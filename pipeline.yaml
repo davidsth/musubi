@@ -1,0 +1,28 @@
+model_version: resnet18-imagenet-v1
+
+stages:
+  - stage: stage-1
+    layers:
+      - conv1
+      - bn1
+      - relu
+      - maxpool
+      - layer1
+      - layer2
+    worker_group: resnet-stage-1
+    endpoint: http://resnet-stage-1:8081
+    model_path: models/resnet18_stage1.onnx
+    input_name: input
+    output_name: features
+
+  - stage: stage-2
+    layers:
+      - layer3
+      - layer4
+      - avgpool
+      - fc
+    worker_group: resnet-stage-2
+    endpoint: http://resnet-stage-2:8081
+    model_path: models/resnet18_stage2.onnx
+    input_name: features
+    output_name: logits
