@@ -28,6 +28,8 @@ On each Mac, Windows, or Linux machine:
 
     cargo run --release -- node --bind 0.0.0.0:9001 --data-port 9000 --manager 192.168.1.10:9002 --heartbeat-ms 1000
 
+The node reports logical CPU count, total RAM, and current available RAM. Available RAM is refreshed and included in each sequence-numbered heartbeat so the manager can see memory pressure change while the node is online.
+
 Replace 192.168.1.10 with the manager machine's LAN address.
 
 Each node creates a UUID once and stores it locally:
@@ -96,13 +98,13 @@ Datagrams are capped at 1200 bytes to reduce IP fragmentation risk. Payload chun
 - The manager does not authenticate node IDs; a device on the LAN can attempt to register a claimed ID.
 - Heartbeat liveness is based on sequence-numbered messages and a configurable timeout, not cryptographic identity.
 - No tensor schema negotiation, inference-runtime integration, GPU-direct networking, RDMA, or zero-copy path.
-- Hardware inventory currently includes only OS, architecture, hostname, and logical CPU count.
+- Hardware inventory includes OS, architecture, hostname, logical CPU count, total RAM, and periodically refreshed available RAM. GPU/accelerator type, VRAM, compute capability, and measured throughput are not yet reported.
 
 ## Roadmap
 
 1. Add congestion control, pacing, selective acknowledgments, and robust transfer IDs.
 2. Add persistent node identities, heartbeats, and disconnect detection. (Implemented in v0.3.)
-3. Report RAM and accelerator capabilities.
+3. Report GPU/accelerator type, VRAM, compute capability, and benchmarked throughput. (RAM reporting added in v0.3.1.)
 4. Persist cluster inventory and add authenticated node enrollment.
 5. Add tensor descriptors (dtype, shape, layout, quantization, offsets).
 6. Add platform-specific fast paths behind a transport abstraction.

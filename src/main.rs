@@ -12,12 +12,14 @@ use std::{
     path::PathBuf,
     time::{Duration, Instant},
 };
+use sysinfo::System;
 use tokio::{fs, net::UdpSocket, time::timeout};
 
 const CHUNK_SIZE: usize = MAX_PAYLOAD;
 const WINDOW_PACKETS: usize = 512;
 const RETRY_LIMIT: usize = 20;
 const ACK_WAIT: Duration = Duration::from_millis(250);
+const MAX_CLUSTER_NODES: usize = 256;
 
 #[derive(Parser)]
 #[command(name = "aitp", version, about = "Experimental distributed-inference transport")]
@@ -208,6 +210,10 @@ async fn run_node(
     let node_id = persistent_node_id()?;
     let hostname = name.unwrap_or_else(local_hostname);
     let logical_cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let mut system = System::new();
+    system.refresh_memory();
+    let total_memory_bytes = system.total_memory();
+    let available_memory_bytes = system.available_memory();
     let announcement = NodeAnnouncement {
         version: CONTROL_VERSION,
         nonce: String::new(),
@@ -216,11 +222,19 @@ async fn run_node(
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
         logical_cpus,
+        total_memory_bytes,
+        available_memory_bytes,
         inference_port: data_port,
     };
 
     println!("AITP node '{}' [{}] listening on {}", hostname, node_id, socket.local_addr()?);
-    println!("Persistent identity stored locally; no remote command execution is supported.");
+    println!(
+        "Persistent identity stored locally; {} logical CPUs, {:.1} GiB total RAM, {:.1} GiB available RAM.",
+        logical_cpus,
+        total_memory_bytes as f64 / 1024.0_f64.powi(3),
+        available_memory_bytes as f64 / 1024.0_f64.powi(3)
+    );
+    println!("No remote command execution is supported.");
 
     if let Some(manager_addr) = manager {
         let registration = serde_json::to_vec(&ControlMessage::Register { node: announcement.clone() })?;
@@ -240,6 +254,10 @@ async fn run_node(
                     version: CONTROL_VERSION,
                     node_id: node_id.clone(),
                     sequence,
+                    available_memory_bytes: {
+                        system.refresh_memory();
+                        system.available_memory()
+                    },
                 };
                 let encoded = serde_json::to_vec(&message)?;
                 if let Some(manager_addr) = manager {
@@ -283,6 +301,8 @@ async fn run_manager(bind: SocketAddr, offline_after: Duration) -> Result<()> {
     loop {
         tokio::select! {
             _ = refresh.tick() => {
+                let retention = offline_after.saturating_mul(10);
+                nodes.retain(|_, node| node.last_seen.elapsed() <= retention);
                 if !nodes.is_empty() {
                     println!("\nCLUSTER INVENTORY ({} known nodes)", nodes.len());
                     let mut ordered: BTreeMap<String, &ManagedNode> = BTreeMap::new();
@@ -290,9 +310,11 @@ async fn run_manager(bind: SocketAddr, offline_after: Duration) -> Result<()> {
                     for (id, node) in ordered {
                         let age = node.last_seen.elapsed();
                         let status = if age <= offline_after { "ONLINE" } else { "OFFLINE" };
-                        println!("- {} [{}] {} {} / {} CPUs | {} | last heartbeat {:.1}s ago",
+                        println!("- {} [{}] {} {} / {} CPUs | RAM {:.1}/{:.1} GiB available/total | {} | last heartbeat {:.1}s ago",
                             node.announcement.hostname, id, node.announcement.os,
                             node.announcement.arch, node.announcement.logical_cpus,
+                            node.announcement.available_memory_bytes as f64 / 1024.0_f64.powi(3),
+                            node.announcement.total_memory_bytes as f64 / 1024.0_f64.powi(3),
                             status, age.as_secs_f32());
                     }
                 }
@@ -302,7 +324,8 @@ async fn run_manager(bind: SocketAddr, offline_after: Duration) -> Result<()> {
                 if n == 0 || n > MAX_CONTROL_DATAGRAM { continue; }
                 let Ok(message) = serde_json::from_slice::<ControlMessage>(&buf[..n]) else { continue };
                 match message {
-                    ControlMessage::Register { node } if node.version == CONTROL_VERSION => {
+                    ControlMessage::Register { node } if node.is_valid() && node.nonce.is_empty()
+                        && (nodes.contains_key(&node.node_id) || nodes.len() < MAX_CLUSTER_NODES) => {
                         let id = node.node_id.clone();
                         let is_new = !nodes.contains_key(&id);
                         nodes.insert(id.clone(), ManagedNode {
@@ -313,12 +336,14 @@ async fn run_manager(bind: SocketAddr, offline_after: Duration) -> Result<()> {
                         });
                         println!("{} node registration: {} from {}", if is_new { "New" } else { "Refreshed" }, id, peer);
                     }
-                    ControlMessage::Heartbeat { version, node_id, sequence } if version == CONTROL_VERSION => {
+                    ControlMessage::Heartbeat { version, node_id, sequence, available_memory_bytes } if version == CONTROL_VERSION => {
                         if let Some(node) = nodes.get_mut(&node_id) {
                             if sequence > node.last_sequence {
                                 node.last_sequence = sequence;
                                 node.last_seen = Instant::now();
                                 node.address = peer;
+                                node.announcement.available_memory_bytes = available_memory_bytes
+                                    .min(node.announcement.total_memory_bytes);
                             }
                         }
                     }
@@ -360,8 +385,10 @@ async fn discover(target: SocketAddr, wait: Duration) -> Result<()> {
     } else {
         println!("Found {} node(s):", nodes.len());
         for node in nodes.values() {
-            println!("- {} [{}] {} / {} | {} logical CPUs | inference port {}",
-                node.hostname, node.node_id, node.os, node.arch, node.logical_cpus, node.inference_port);
+            println!("- {} [{}] {} / {} | {} CPUs | {:.1}/{:.1} GiB available/total RAM | inference port {}",
+                node.hostname, node.node_id, node.os, node.arch, node.logical_cpus,
+                node.available_memory_bytes as f64 / 1024.0_f64.powi(3),
+                node.total_memory_bytes as f64 / 1024.0_f64.powi(3), node.inference_port);
         }
     }
     Ok(())

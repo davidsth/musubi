@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.3.1 — Hardware memory inventory
+
+- Added cross-platform total and available system RAM reporting through sysinfo.
+- Included available RAM in sequence-numbered heartbeats so the manager sees changing memory pressure.
+- Bumped the control-plane protocol version to 2 for the expanded node/heartbeat schema.
+- Added metadata validation and a 256-node registration cap to limit accidental or hostile LAN registry growth.
+- Retained offline node entries for a bounded period, then pruned them.
+- Added serialization and validation tests for memory metadata and heartbeats.
+
 ## v0.3.0 — Persistent identity and cluster heartbeats
 
 - Persisted a UUID node identity locally across agent restarts.
