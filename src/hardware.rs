@@ -66,7 +66,7 @@ fn linux() -> Option<Vec<AcceleratorInfo>> {
     let found: Vec<_> = String::from_utf8_lossy(&out.stdout).lines().filter(|line| {
         let l = line.to_lowercase(); l.contains("vga compatible controller") || l.contains("3d controller") || l.contains("display controller")
     }).filter_map(|line| {
-        let name = line.split_once(':')?.1.trim();
+        let name = line.rsplit_once(": ")?.1.trim();
         let l = name.to_lowercase();
         let vendor = if l.contains("nvidia") { "NVIDIA" } else if l.contains("amd") || l.contains("radeon") { "AMD" } else if l.contains("intel") { "Intel" } else { "Unknown" };
         Some(AcceleratorInfo { name: name.into(), vendor: vendor.into(), memory_bytes: None, unified_memory: false })

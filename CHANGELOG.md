@@ -8,6 +8,7 @@
 - Added Windows video-controller detection via PowerShell CIM and Linux display-controller detection via lspci.
 - Included accelerator inventory in node registration/discovery and manager output.
 - Added tests for unified-memory reporting.
+- Bumped the control-plane version to 3 for the expanded registration schema.
 - Probes fail gracefully when optional vendor tools are unavailable.
 
 ## v0.3.1 — Hardware memory inventory

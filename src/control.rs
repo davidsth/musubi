@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const CONTROL_VERSION: u8 = 2;
+pub const CONTROL_VERSION: u8 = 3;
 pub const MAX_CONTROL_DATAGRAM: usize = 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -4,7 +4,7 @@ mod protocol;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use control::{AcceleratorInfo, ControlMessage, NodeAnnouncement, CONTROL_VERSION, MAX_CONTROL_DATAGRAM};
+use control::{ControlMessage, NodeAnnouncement, CONTROL_VERSION, MAX_CONTROL_DATAGRAM};
 use protocol::*;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -211,7 +211,7 @@ async fn run_node(
     let node_id = persistent_node_id()?;
     let hostname = name.unwrap_or_else(local_hostname);
     let logical_cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-    let mut system = System::new();
+    let mut system = System::new_all();
     system.refresh_memory();
     let total_memory_bytes = system.total_memory();
     let available_memory_bytes = system.available_memory();
