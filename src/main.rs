@@ -5,7 +5,13 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use control::{ControlMessage, NodeAnnouncement, CONTROL_VERSION, MAX_CONTROL_DATAGRAM};
 use protocol::*;
-use std::{collections::HashSet, net::SocketAddr, path::PathBuf, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    io::Write,
+    net::SocketAddr,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 use tokio::{fs, net::UdpSocket, time::timeout};
 
 const CHUNK_SIZE: usize = MAX_PAYLOAD;
@@ -25,13 +31,19 @@ enum Command {
     /// Send a file as tensor chunks to an AITP receiver.
     Send { #[arg(long)] target: SocketAddr, #[arg(long)] input: PathBuf,
            #[arg(long, default_value_t = 1)] tensor_id: u32 },
-    /// Run a LAN discovery agent. This advertises metadata only; it cannot execute workloads.
+    /// Run a LAN node agent with a persistent identity.
     Node { #[arg(long, default_value = "0.0.0.0:9001")] bind: SocketAddr,
            #[arg(long, default_value_t = 9000)] data_port: u16,
-           #[arg(long)] name: Option<String> },
+           #[arg(long)] name: Option<String>,
+           /// Optional manager control endpoint, for example 192.168.1.10:9002.
+           #[arg(long)] manager: Option<SocketAddr>,
+           #[arg(long, default_value_t = 1000)] heartbeat_ms: u64 },
     /// Discover AITP nodes using IPv4 UDP broadcast.
     Discover { #[arg(long, default_value = "255.255.255.255:9001")] target: SocketAddr,
                #[arg(long, default_value_t = 1500)] wait_ms: u64 },
+    /// Run a cluster manager that tracks registrations and node liveness.
+    Manager { #[arg(long, default_value = "0.0.0.0:9002")] bind: SocketAddr,
+              #[arg(long, default_value_t = 5000)] timeout_ms: u64 },
 }
 
 #[tokio::main]
@@ -40,8 +52,12 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Receive { bind, output } => receive(bind, output).await,
         Command::Send { target, input, tensor_id } => send(target, input, tensor_id).await,
-        Command::Node { bind, data_port, name } => run_node(bind, data_port, name).await,
-        Command::Discover { target, wait_ms } => discover(target, Duration::from_millis(wait_ms)).await,
+        Command::Node { bind, data_port, name, manager, heartbeat_ms } =>
+            run_node(bind, data_port, name, manager, heartbeat_ms).await,
+        Command::Discover { target, wait_ms } =>
+            discover(target, Duration::from_millis(wait_ms)).await,
+        Command::Manager { bind, timeout_ms } =>
+            run_manager(bind, Duration::from_millis(timeout_ms.max(500))).await,
     }
 }
 
@@ -161,34 +177,154 @@ async fn receive(bind: SocketAddr, output: PathBuf) -> Result<()> {
     }
 }
 
-async fn run_node(bind: SocketAddr, data_port: u16, name: Option<String>) -> Result<()> {
+fn persistent_node_id() -> Result<String> {
+    let base = if cfg!(windows) {
+        std::env::var_os("APPDATA").map(PathBuf::from)
+    } else {
+        std::env::var_os("HOME").map(PathBuf::from)
+    }.unwrap_or(std::env::current_dir()?);
+    let dir = if cfg!(windows) { base.join("aitp") } else { base.join(".aitp") };
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("node-id");
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let id = existing.trim();
+        if uuid::Uuid::parse_str(id).is_ok() { return Ok(id.to_owned()); }
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    let mut file = std::fs::OpenOptions::new().create(true).truncate(true).write(true).open(path)?;
+    file.write_all(id.as_bytes())?;
+    file.sync_all()?;
+    Ok(id)
+}
+
+async fn run_node(
+    bind: SocketAddr,
+    data_port: u16,
+    name: Option<String>,
+    manager: Option<SocketAddr>,
+    heartbeat_ms: u64,
+) -> Result<()> {
     let socket = UdpSocket::bind(bind).await?;
-    let node_id = uuid::Uuid::new_v4().to_string();
+    let node_id = persistent_node_id()?;
     let hostname = name.unwrap_or_else(local_hostname);
     let logical_cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-    println!("AITP node agent '{}' ({}) listening on {}", hostname, node_id, socket.local_addr()?);
-    println!("Discovery only: no remote command execution is supported.");
+    let announcement = NodeAnnouncement {
+        version: CONTROL_VERSION,
+        nonce: String::new(),
+        node_id: node_id.clone(),
+        hostname: hostname.clone(),
+        os: std::env::consts::OS.to_string(),
+        arch: std::env::consts::ARCH.to_string(),
+        logical_cpus,
+        inference_port: data_port,
+    };
 
+    println!("AITP node '{}' [{}] listening on {}", hostname, node_id, socket.local_addr()?);
+    println!("Persistent identity stored locally; no remote command execution is supported.");
+
+    if let Some(manager_addr) = manager {
+        let registration = serde_json::to_vec(&ControlMessage::Register { node: announcement.clone() })?;
+        socket.send_to(&registration, manager_addr).await?;
+        println!("Registered with cluster manager at {}", manager_addr);
+    }
+
+    let mut heartbeat = tokio::time::interval(Duration::from_millis(heartbeat_ms.max(100)));
+    let mut sequence = 0u64;
     let mut buf = [0u8; MAX_CONTROL_DATAGRAM];
-    loop {
-        let (n, peer) = socket.recv_from(&mut buf).await?;
-        if n == 0 || n > MAX_CONTROL_DATAGRAM { continue; }
-        let Ok(ControlMessage::Discover { version, nonce }) = serde_json::from_slice(&buf[..n]) else { continue };
-        if version != CONTROL_VERSION { continue; }
 
-        let announcement = NodeAnnouncement {
-            version: CONTROL_VERSION,
-            nonce,
-            node_id: node_id.clone(),
-            hostname: hostname.clone(),
-            os: std::env::consts::OS.to_string(),
-            arch: std::env::consts::ARCH.to_string(),
-            logical_cpus,
-            inference_port: data_port,
-        };
-        let response = serde_json::to_vec(&ControlMessage::Announce(announcement))?;
-        if response.len() <= MAX_CONTROL_DATAGRAM {
-            socket.send_to(&response, peer).await?;
+    loop {
+        tokio::select! {
+            _ = heartbeat.tick(), if manager.is_some() => {
+                sequence = sequence.saturating_add(1);
+                let message = ControlMessage::Heartbeat {
+                    version: CONTROL_VERSION,
+                    node_id: node_id.clone(),
+                    sequence,
+                };
+                let encoded = serde_json::to_vec(&message)?;
+                if let Some(manager_addr) = manager {
+                    socket.send_to(&encoded, manager_addr).await?;
+                }
+            }
+            received = socket.recv_from(&mut buf) => {
+                let (n, peer) = received?;
+                if n == 0 || n > MAX_CONTROL_DATAGRAM { continue; }
+                let Ok(ControlMessage::Discover { version, nonce }) = serde_json::from_slice(&buf[..n]) else { continue };
+                if version != CONTROL_VERSION { continue; }
+
+                let mut response_node = announcement.clone();
+                response_node.nonce = nonce;
+                let response = serde_json::to_vec(&ControlMessage::Announce(response_node))?;
+                if response.len() <= MAX_CONTROL_DATAGRAM {
+                    socket.send_to(&response, peer).await?;
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ManagedNode {
+    announcement: NodeAnnouncement,
+    address: SocketAddr,
+    last_seen: Instant,
+    last_sequence: u64,
+}
+
+async fn run_manager(bind: SocketAddr, offline_after: Duration) -> Result<()> {
+    let socket = UdpSocket::bind(bind).await?;
+    println!("AITP cluster manager listening on {}", socket.local_addr()?);
+    println!("Nodes are marked OFFLINE after {} ms without a heartbeat.", offline_after.as_millis());
+
+    let mut nodes: HashMap<String, ManagedNode> = HashMap::new();
+    let mut buf = [0u8; MAX_CONTROL_DATAGRAM];
+    let mut refresh = tokio::time::interval(Duration::from_secs(1));
+
+    loop {
+        tokio::select! {
+            _ = refresh.tick() => {
+                if !nodes.is_empty() {
+                    println!("\nCLUSTER INVENTORY ({} known nodes)", nodes.len());
+                    let mut ordered: BTreeMap<String, &ManagedNode> = BTreeMap::new();
+                    for (id, node) in &nodes { ordered.insert(id.clone(), node); }
+                    for (id, node) in ordered {
+                        let age = node.last_seen.elapsed();
+                        let status = if age <= offline_after { "ONLINE" } else { "OFFLINE" };
+                        println!("- {} [{}] {} {} / {} CPUs | {} | last heartbeat {:.1}s ago",
+                            node.announcement.hostname, id, node.announcement.os,
+                            node.announcement.arch, node.announcement.logical_cpus,
+                            status, age.as_secs_f32());
+                    }
+                }
+            }
+            received = socket.recv_from(&mut buf) => {
+                let (n, peer) = received?;
+                if n == 0 || n > MAX_CONTROL_DATAGRAM { continue; }
+                let Ok(message) = serde_json::from_slice::<ControlMessage>(&buf[..n]) else { continue };
+                match message {
+                    ControlMessage::Register { node } if node.version == CONTROL_VERSION => {
+                        let id = node.node_id.clone();
+                        let is_new = !nodes.contains_key(&id);
+                        nodes.insert(id.clone(), ManagedNode {
+                            announcement: node,
+                            address: peer,
+                            last_seen: Instant::now(),
+                            last_sequence: 0,
+                        });
+                        println!("{} node registration: {} from {}", if is_new { "New" } else { "Refreshed" }, id, peer);
+                    }
+                    ControlMessage::Heartbeat { version, node_id, sequence } if version == CONTROL_VERSION => {
+                        if let Some(node) = nodes.get_mut(&node_id) {
+                            if sequence > node.last_sequence {
+                                node.last_sequence = sequence;
+                                node.last_seen = Instant::now();
+                                node.address = peer;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 }
@@ -203,17 +339,16 @@ async fn discover(target: SocketAddr, wait: Duration) -> Result<()> {
     println!("Searching for AITP nodes via {} for {} ms...", target, wait.as_millis());
 
     let deadline = tokio::time::Instant::now() + wait;
-    let mut nodes = std::collections::BTreeMap::<String, NodeAnnouncement>::new();
+    let mut nodes = BTreeMap::<String, NodeAnnouncement>::new();
     let mut buf = [0u8; MAX_CONTROL_DATAGRAM];
     while tokio::time::Instant::now() < deadline {
         let remaining = deadline - tokio::time::Instant::now();
         match timeout(remaining, socket.recv_from(&mut buf)).await {
-            Ok(Ok((n, peer))) => {
+            Ok(Ok((n, _peer))) => {
                 if n == 0 || n > MAX_CONTROL_DATAGRAM { continue; }
                 let Ok(ControlMessage::Announce(node)) = serde_json::from_slice(&buf[..n]) else { continue };
                 if node.version != CONTROL_VERSION || node.nonce != nonce { continue; }
                 nodes.entry(node.node_id.clone()).or_insert(node);
-                let _ = peer;
             }
             Ok(Err(e)) => return Err(e.into()),
             Err(_) => break,
