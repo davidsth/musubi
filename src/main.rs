@@ -1,6 +1,7 @@
 mod control;
 mod hardware;
 mod protocol;
+mod tensor;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};

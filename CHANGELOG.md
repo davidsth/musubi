@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.5.0 — Typed tensor descriptors
+
+- Added bounded tensor metadata with dtype, shape, layout, storage encoding, tensor ID, and exact byte length.
+- Added raw tensor sizing plus GGML Q4_0/Q4_1/Q5_0/Q5_1/Q8_0 block-size calculations.
+- Added checked arithmetic, rank/name/size limits, and descriptor validation.
+- Added a versioned TensorOffer control-plane message; the existing 32-byte binary data-plane header is unchanged.
+- Added tests for raw and quantized sizing, invalid dimensions, overflow, incompatible layout/dtype, and control-message round trips.
+
 ## v0.4.0 — CPU and accelerator inventory
 
 - Added CPU model reporting.

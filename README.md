@@ -86,6 +86,12 @@ All integers are big-endian. Header size is 32 bytes.
 
 Datagrams are capped at 1200 bytes to reduce IP fragmentation risk. Payload chunks are at most 1168 bytes.
 
+## Tensor descriptor metadata v0.5
+
+AITP now defines a bounded `TensorDescriptor` schema for the worker-execution milestone. A descriptor carries the tensor ID (matching the existing 32-byte data-plane header), name, logical dtype, shape, layout, storage encoding, and exact byte length. Raw F32/F16/BF16/integer storage is supported, along with initial GGML Q4_0, Q4_1, Q5_0, Q5_1, and Q8_0 block-size calculations. Descriptors are validated with checked arithmetic, a maximum rank of 8, and a 1 TiB safety ceiling.
+
+`ControlMessage::TensorOffer` defines the versioned control-plane envelope for advertising a descriptor before sending its bytes. This is currently a schema and validation increment: the node agent does not yet accept offers, allocate tensor buffers, or dispatch worker execution. Tensor bytes continue to travel over the existing binary data plane; the 32-byte header is unchanged.
+
 ## Current limitations
 
 - ACK/retry is basic and uses batches of up to 512 chunks.
@@ -105,11 +111,12 @@ Datagrams are capped at 1200 bytes to reduce IP fragmentation risk. Payload chun
 1. Add congestion control, pacing, selective acknowledgments, and robust transfer IDs.
 2. Add persistent node identities, heartbeats, and disconnect detection. (Implemented in v0.3.)
 3. Report CPU model and best-effort GPU/accelerator inventory. (Initial probes added in v0.4.)
-4. Build worker execution protocol and tensor descriptors (dtype, shape, layout, quantization, offsets).
-5. Integrate one inference backend (llama.cpp on CPU first) and execute a remote layer on a worker.
-6. Implement pipeline partitioning: place contiguous transformer layer ranges on workers, transfer activations, and stream generated tokens.
-7. Add automatic memory-aware placement, then GPU/Metal/CUDA acceleration and performance tuning.
-8. Add authentication, persistent manager inventory, congestion control, and benchmarking.
+4. Define and validate tensor descriptors and control-plane offers. (Initial schema added in v0.5.)
+5. Implement authenticated/authorized worker tensor-offer handling and bounded receive allocation.
+6. Integrate one inference backend (llama.cpp on CPU first) and execute a remote layer on a worker.
+7. Implement pipeline partitioning: place contiguous transformer layer ranges on workers, transfer activations, and stream generated tokens.
+8. Add automatic memory-aware placement, then GPU/Metal/CUDA acceleration and performance tuning.
+9. Add authentication, congestion control, and benchmarking.
 
 ## Security
 

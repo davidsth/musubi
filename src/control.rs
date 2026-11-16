@@ -1,8 +1,9 @@
 //! Versioned control-plane messages. Tensor payloads remain on the binary data plane.
 
+use crate::tensor::TensorDescriptor;
 use serde::{Deserialize, Serialize};
 
-pub const CONTROL_VERSION: u8 = 3;
+pub const CONTROL_VERSION: u8 = 4;
 pub const MAX_CONTROL_DATAGRAM: usize = 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -11,6 +12,10 @@ pub enum ControlMessage {
     Discover { version: u8, nonce: String },
     Announce(NodeAnnouncement),
     Register { node: NodeAnnouncement },
+    TensorOffer {
+        version: u8,
+        descriptor: TensorDescriptor,
+    },
     Heartbeat {
         version: u8,
         node_id: String,
@@ -118,6 +123,30 @@ mod tests {
             serde_json::from_slice::<ControlMessage>(&registration).unwrap(),
             ControlMessage::Register { .. }
         ));
+    }
+
+    #[test]
+    fn tensor_offer_round_trips_with_bounded_descriptor() {
+        let descriptor = TensorDescriptor {
+            tensor_id: 9,
+            name: "embedding.weight".into(),
+            dtype: crate::tensor::TensorDType::F16,
+            shape: vec![4096, 4096],
+            layout: crate::tensor::TensorLayout::RowMajor,
+            encoding: crate::tensor::TensorEncoding::Raw,
+            byte_len: 33_554_432,
+        };
+        assert!(descriptor.validate().is_ok());
+        let encoded = serde_json::to_vec(&ControlMessage::TensorOffer {
+            version: CONTROL_VERSION,
+            descriptor,
+        }).unwrap();
+        assert!(encoded.len() <= MAX_CONTROL_DATAGRAM);
+        let decoded: ControlMessage = serde_json::from_slice(&encoded).unwrap();
+        assert!(matches!(decoded, ControlMessage::TensorOffer {
+            version: CONTROL_VERSION,
+            descriptor,
+        } if descriptor.byte_len == 33_554_432));
     }
 
     #[test]
