@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.4.0 — CPU and accelerator inventory
+
+- Added CPU model reporting.
+- Added best-effort NVIDIA GPU detection via nvidia-smi.
+- Added macOS system_profiler GPU detection and Apple Silicon unified-memory labeling.
+- Added Windows video-controller detection via PowerShell CIM and Linux display-controller detection via lspci.
+- Included accelerator inventory in node registration/discovery and manager output.
+- Added tests for unified-memory reporting.
+- Probes fail gracefully when optional vendor tools are unavailable.
+
 ## v0.3.1 — Hardware memory inventory
 
 - Added cross-platform total and available system RAM reporting through sysinfo.

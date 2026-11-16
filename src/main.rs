@@ -1,9 +1,10 @@
 mod control;
+mod hardware;
 mod protocol;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use control::{ControlMessage, NodeAnnouncement, CONTROL_VERSION, MAX_CONTROL_DATAGRAM};
+use control::{AcceleratorInfo, ControlMessage, NodeAnnouncement, CONTROL_VERSION, MAX_CONTROL_DATAGRAM};
 use protocol::*;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -214,6 +215,8 @@ async fn run_node(
     system.refresh_memory();
     let total_memory_bytes = system.total_memory();
     let available_memory_bytes = system.available_memory();
+    let cpu_model = system.cpus().first().map(|cpu| cpu.brand().trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| "Unknown CPU".into());
+    let accelerators = hardware::detect_accelerators();
     let announcement = NodeAnnouncement {
         version: CONTROL_VERSION,
         nonce: String::new(),
@@ -222,6 +225,8 @@ async fn run_node(
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
         logical_cpus,
+        cpu_model: cpu_model.clone(),
+        accelerators: accelerators.clone(),
         total_memory_bytes,
         available_memory_bytes,
         inference_port: data_port,
@@ -234,6 +239,9 @@ async fn run_node(
         total_memory_bytes as f64 / 1024.0_f64.powi(3),
         available_memory_bytes as f64 / 1024.0_f64.powi(3)
     );
+    println!("CPU: {}", cpu_model);
+    for gpu in &accelerators { println!("Accelerator: {} ({}, {})", gpu.name, gpu.vendor, hardware::memory_label(gpu)); }
+    if accelerators.is_empty() { println!("No GPU probe found. Apple Silicon GPU shares unified system memory."); }
     println!("No remote command execution is supported.");
 
     if let Some(manager_addr) = manager {
@@ -310,12 +318,13 @@ async fn run_manager(bind: SocketAddr, offline_after: Duration) -> Result<()> {
                     for (id, node) in ordered {
                         let age = node.last_seen.elapsed();
                         let status = if age <= offline_after { "ONLINE" } else { "OFFLINE" };
-                        println!("- {} [{}] {} {} / {} CPUs | RAM {:.1}/{:.1} GiB available/total | {} | last heartbeat {:.1}s ago",
+                        println!("- {} [{}] {} {} | {} | {} CPUs | RAM {:.1}/{:.1} GiB available/total | {} | last heartbeat {:.1}s ago",
                             node.announcement.hostname, id, node.announcement.os,
-                            node.announcement.arch, node.announcement.logical_cpus,
+                            node.announcement.arch, node.announcement.cpu_model, node.announcement.logical_cpus,
                             node.announcement.available_memory_bytes as f64 / 1024.0_f64.powi(3),
                             node.announcement.total_memory_bytes as f64 / 1024.0_f64.powi(3),
                             status, age.as_secs_f32());
+                        for gpu in &node.announcement.accelerators { println!("    GPU: {} ({}, {})", gpu.name, gpu.vendor, hardware::memory_label(gpu)); }
                     }
                 }
             }
@@ -385,10 +394,11 @@ async fn discover(target: SocketAddr, wait: Duration) -> Result<()> {
     } else {
         println!("Found {} node(s):", nodes.len());
         for node in nodes.values() {
-            println!("- {} [{}] {} / {} | {} CPUs | {:.1}/{:.1} GiB available/total RAM | inference port {}",
-                node.hostname, node.node_id, node.os, node.arch, node.logical_cpus,
+            println!("- {} [{}] {} / {} | {} | {} CPUs | {:.1}/{:.1} GiB available/total RAM | inference port {}",
+                node.hostname, node.node_id, node.os, node.arch, node.cpu_model, node.logical_cpus,
                 node.available_memory_bytes as f64 / 1024.0_f64.powi(3),
                 node.total_memory_bytes as f64 / 1024.0_f64.powi(3), node.inference_port);
+            for gpu in &node.accelerators { println!("    GPU: {} ({}, {})", gpu.name, gpu.vendor, hardware::memory_label(gpu)); }
         }
     }
     Ok(())

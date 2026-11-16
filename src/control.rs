@@ -20,6 +20,14 @@ pub enum ControlMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcceleratorInfo {
+    pub name: String,
+    pub vendor: String,
+    pub memory_bytes: Option<u64>,
+    pub unified_memory: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeAnnouncement {
     pub version: u8,
     pub nonce: String,
@@ -28,6 +36,8 @@ pub struct NodeAnnouncement {
     pub os: String,
     pub arch: String,
     pub logical_cpus: usize,
+    pub cpu_model: String,
+    pub accelerators: Vec<AcceleratorInfo>,
     pub total_memory_bytes: u64,
     pub available_memory_bytes: u64,
     pub inference_port: u16,
@@ -47,6 +57,9 @@ impl NodeAnnouncement {
             && self.arch.len() <= 32
             && self.nonce.len() <= 64
             && (1..=4096).contains(&self.logical_cpus)
+            && !self.cpu_model.is_empty() && self.cpu_model.len() <= 256
+            && self.accelerators.len() <= 8
+            && self.accelerators.iter().all(|gpu| !gpu.name.is_empty() && gpu.name.len() <= 256 && gpu.vendor.len() <= 64)
             && self.total_memory_bytes <= (1_u64 << 60)
             && self.available_memory_bytes <= self.total_memory_bytes
             && self.inference_port != 0
@@ -66,6 +79,8 @@ mod tests {
             os: "macos".into(),
             arch: "aarch64".into(),
             logical_cpus: 10,
+            cpu_model: "Apple M3".into(),
+            accelerators: vec![AcceleratorInfo { name: "Apple M3 GPU".into(), vendor: "Apple".into(), memory_bytes: None, unified_memory: true }],
             total_memory_bytes: 16 * 1024 * 1024 * 1024,
             available_memory_bytes: 8 * 1024 * 1024 * 1024,
             inference_port: 9000,

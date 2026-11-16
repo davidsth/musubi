@@ -28,7 +28,7 @@ On each Mac, Windows, or Linux machine:
 
     cargo run --release -- node --bind 0.0.0.0:9001 --data-port 9000 --manager 192.168.1.10:9002 --heartbeat-ms 1000
 
-The node reports logical CPU count, total RAM, and current available RAM. Available RAM is refreshed and included in each sequence-numbered heartbeat so the manager can see memory pressure change while the node is online.
+The node reports CPU model, logical CPU count, total RAM, current available RAM, and best-effort GPU inventory. NVIDIA devices are queried through nvidia-smi; macOS uses system_profiler (Apple Silicon GPUs are marked as sharing unified system memory); Windows uses PowerShell CIM; Linux falls back to lspci. Available RAM is refreshed in each sequence-numbered heartbeat.
 
 Replace 192.168.1.10 with the manager machine's LAN address.
 
@@ -98,18 +98,18 @@ Datagrams are capped at 1200 bytes to reduce IP fragmentation risk. Payload chun
 - The manager does not authenticate node IDs; a device on the LAN can attempt to register a claimed ID.
 - Heartbeat liveness is based on sequence-numbered messages and a configurable timeout, not cryptographic identity.
 - No tensor schema negotiation, inference-runtime integration, GPU-direct networking, RDMA, or zero-copy path.
-- Hardware inventory includes OS, architecture, hostname, logical CPU count, total RAM, and periodically refreshed available RAM. GPU/accelerator type, VRAM, compute capability, and measured throughput are not yet reported.
+- Hardware inventory includes CPU model, OS, architecture, logical CPU count, total RAM, periodically refreshed available RAM, and best-effort accelerator names/vendors/memory. NVIDIA VRAM is reported when nvidia-smi is installed. Apple Silicon is represented as an integrated GPU sharing unified system memory. Some platform probes identify devices without reliable VRAM data. Compute capability, utilization, and measured throughput are not yet reported.
 
 ## Roadmap
 
 1. Add congestion control, pacing, selective acknowledgments, and robust transfer IDs.
 2. Add persistent node identities, heartbeats, and disconnect detection. (Implemented in v0.3.)
-3. Report GPU/accelerator type, VRAM, compute capability, and benchmarked throughput. (RAM reporting added in v0.3.1.)
-4. Persist cluster inventory and add authenticated node enrollment.
-5. Add tensor descriptors (dtype, shape, layout, quantization, offsets).
-6. Add platform-specific fast paths behind a transport abstraction.
-7. Integrate with llama.cpp first, then evaluate MLX on Apple Silicon.
-8. Benchmark against TCP, QUIC, and existing distributed inference approaches on 1/2.5/10 GbE.
+3. Report CPU model and best-effort GPU/accelerator inventory. (Initial probes added in v0.4.)
+4. Build worker execution protocol and tensor descriptors (dtype, shape, layout, quantization, offsets).
+5. Integrate one inference backend (llama.cpp on CPU first) and execute a remote layer on a worker.
+6. Implement pipeline partitioning: place contiguous transformer layer ranges on workers, transfer activations, and stream generated tokens.
+7. Add automatic memory-aware placement, then GPU/Metal/CUDA acceleration and performance tuning.
+8. Add authentication, persistent manager inventory, congestion control, and benchmarking.
 
 ## Security
 
