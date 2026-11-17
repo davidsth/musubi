@@ -1,12 +1,16 @@
+mod auth;
 mod control;
 mod hardware;
 mod protocol;
 mod tensor;
+mod worker;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use control::{ControlMessage, NodeAnnouncement, CONTROL_VERSION, MAX_CONTROL_DATAGRAM};
+use control::{ControlMessage, NodeAnnouncement, TensorOfferMessage, TensorOfferReply, CONTROL_VERSION, MAX_CONTROL_DATAGRAM};
 use protocol::*;
+use tensor::TensorDescriptor;
+use worker::OfferAdmission;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     io::Write,
@@ -35,6 +39,8 @@ enum Command {
     /// Send a file as tensor chunks to an AITP receiver.
     Send { #[arg(long)] target: SocketAddr, #[arg(long)] input: PathBuf,
            #[arg(long, default_value_t = 1)] tensor_id: u32 },
+    /// Submit authenticated tensor metadata to a worker. No tensor bytes are sent.
+    Offer { #[arg(long)] target: SocketAddr, #[arg(long)] descriptor: PathBuf },
     /// Run a LAN node agent with a persistent identity.
     Node { #[arg(long, default_value = "0.0.0.0:9001")] bind: SocketAddr,
            #[arg(long, default_value_t = 9000)] data_port: u16,
@@ -56,6 +62,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Receive { bind, output } => receive(bind, output).await,
         Command::Send { target, input, tensor_id } => send(target, input, tensor_id).await,
+        Command::Offer { target, descriptor } => offer_tensor(target, descriptor).await,
         Command::Node { bind, data_port, name, manager, heartbeat_ms } =>
             run_node(bind, data_port, name, manager, heartbeat_ms).await,
         Command::Discover { target, wait_ms } =>
@@ -131,6 +138,76 @@ async fn send(target: SocketAddr, input: PathBuf, tensor_id: u32) -> Result<()> 
     bail!("receiver did not confirm transfer completion")
 }
 
+
+async fn offer_tensor(target: SocketAddr, descriptor_path: PathBuf) -> Result<()> {
+    let key = auth::cluster_key_from_env()?
+        .context("set AITP_CLUSTER_KEY to the same 32+ byte secret used by the worker")?;
+    let descriptor_bytes = fs::read(&descriptor_path)
+        .await
+        .with_context(|| format!("reading {}", descriptor_path.display()))?;
+    let descriptor: TensorDescriptor = serde_json::from_slice(&descriptor_bytes)
+        .context("parsing tensor descriptor JSON")?;
+    descriptor.validate()?;
+
+    let sender_node_id = persistent_node_id()?;
+    let sequence = next_offer_sequence()?;
+    let random_id = uuid::Uuid::new_v4();
+    let message_id = u32::from_be_bytes(random_id.as_bytes()[0..4].try_into()?) | 1;
+    let mut offer = TensorOfferMessage {
+        version: CONTROL_VERSION,
+        sender_node_id: sender_node_id.clone(),
+        sequence,
+        message_id,
+        descriptor,
+        auth_tag: Vec::new(),
+    };
+    auth::sign_tensor_offer(&mut offer, &key)?;
+
+    let encoded = serde_json::to_vec(&ControlMessage::TensorOffer { offer: offer.clone() })?;
+    if encoded.len() > MAX_CONTROL_DATAGRAM {
+        bail!("tensor offer is {} bytes; control-plane limit is {}", encoded.len(), MAX_CONTROL_DATAGRAM);
+    }
+
+    let bind = if target.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
+    let socket = UdpSocket::bind(bind).await?;
+    socket.connect(target).await?;
+    socket.send(&encoded).await?;
+
+    let mut buf = [0u8; MAX_CONTROL_DATAGRAM];
+    let n = timeout(Duration::from_secs(3), socket.recv(&mut buf))
+        .await
+        .context("timed out waiting for tensor-offer admission reply")??;
+    let response: ControlMessage = serde_json::from_slice(&buf[..n])?;
+    let ControlMessage::TensorOfferReply { reply } = response else {
+        bail!("worker returned an unexpected control message");
+    };
+    if !auth::verify_tensor_offer_reply(&reply, &key)? {
+        bail!("worker reply authentication failed; verify that both nodes share the same AITP_CLUSTER_KEY");
+    }
+    if reply.sender_node_id != sender_node_id
+        || reply.sequence != sequence
+        || reply.message_id != message_id
+        || reply.tensor_id != offer.descriptor.tensor_id
+    {
+        bail!("worker reply does not match this tensor offer");
+    }
+    if !reply.accepted {
+        bail!(
+            "worker rejected tensor offer: {}",
+            reply.reason.as_deref().unwrap_or("no reason supplied")
+        );
+    }
+
+    println!(
+        "Worker {} admitted metadata for tensor '{}' ({} bytes).",
+        reply.receiver_node_id,
+        offer.descriptor.name,
+        offer.descriptor.byte_len
+    );
+    println!("No tensor bytes were sent; authenticated data-plane transfer is the next milestone.");
+    Ok(())
+}
+
 async fn receive(bind: SocketAddr, output: PathBuf) -> Result<()> {
     let socket = UdpSocket::bind(bind).await?;
     println!("AITP receiver listening on {}", socket.local_addr()?);
@@ -181,7 +258,7 @@ async fn receive(bind: SocketAddr, output: PathBuf) -> Result<()> {
     }
 }
 
-fn persistent_node_id() -> Result<String> {
+fn aitp_state_dir() -> Result<PathBuf> {
     let base = if cfg!(windows) {
         std::env::var_os("APPDATA").map(PathBuf::from)
     } else {
@@ -189,16 +266,45 @@ fn persistent_node_id() -> Result<String> {
     }.unwrap_or(std::env::current_dir()?);
     let dir = if cfg!(windows) { base.join("aitp") } else { base.join(".aitp") };
     std::fs::create_dir_all(&dir)?;
-    let path = dir.join("node-id");
+    Ok(dir)
+}
+
+fn persistent_node_id() -> Result<String> {
+    let path = aitp_state_dir()?.join("node-id");
     if let Ok(existing) = std::fs::read_to_string(&path) {
         let id = existing.trim();
-        if uuid::Uuid::parse_str(id).is_ok() { return Ok(id.to_owned()); }
+        if uuid::Uuid::parse_str(id).is_ok() {
+            return Ok(id.to_owned());
+        }
     }
     let id = uuid::Uuid::new_v4().to_string();
-    let mut file = std::fs::OpenOptions::new().create(true).truncate(true).write(true).open(path)?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(path)?;
     file.write_all(id.as_bytes())?;
     file.sync_all()?;
     Ok(id)
+}
+
+fn next_offer_sequence() -> Result<u64> {
+    let path = aitp_state_dir()?.join("offer-sequence");
+    let previous = match std::fs::read_to_string(&path) {
+        Ok(value) => value.trim().parse::<u64>()
+            .context("parsing persisted tensor-offer sequence")?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => return Err(error.into()),
+    };
+    let next = previous.checked_add(1).context("tensor-offer sequence exhausted")?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(path)?;
+    file.write_all(next.to_string().as_bytes())?;
+    file.sync_all()?;
+    Ok(next)
 }
 
 async fn run_node(
@@ -208,6 +314,7 @@ async fn run_node(
     manager: Option<SocketAddr>,
     heartbeat_ms: u64,
 ) -> Result<()> {
+    let cluster_key = auth::cluster_key_from_env()?;
     let socket = UdpSocket::bind(bind).await?;
     let node_id = persistent_node_id()?;
     let hostname = name.unwrap_or_else(local_hostname);
@@ -243,6 +350,11 @@ async fn run_node(
     println!("CPU: {}", cpu_model);
     for gpu in &accelerators { println!("Accelerator: {} ({}, {})", gpu.name, gpu.vendor, hardware::memory_label(gpu)); }
     if accelerators.is_empty() { println!("No GPU probe found. Apple Silicon GPU shares unified system memory."); }
+    if cluster_key.is_some() {
+        println!("Authenticated tensor-offer admission is enabled (metadata only).");
+    } else {
+        println!("Tensor offers are disabled; set AITP_CLUSTER_KEY on trusted cluster nodes to enable them.");
+    }
     println!("No remote command execution is supported.");
 
     if let Some(manager_addr) = manager {
@@ -253,6 +365,8 @@ async fn run_node(
 
     let mut heartbeat = tokio::time::interval(Duration::from_millis(heartbeat_ms.max(100)));
     let mut sequence = 0u64;
+    let mut offer_admission = OfferAdmission::default();
+    let mut offer_reap = tokio::time::interval(Duration::from_secs(1));
     let mut buf = [0u8; MAX_CONTROL_DATAGRAM];
 
     loop {
@@ -273,17 +387,56 @@ async fn run_node(
                     socket.send_to(&encoded, manager_addr).await?;
                 }
             }
+            _ = offer_reap.tick() => {
+                offer_admission.expire(Instant::now());
+            }
             received = socket.recv_from(&mut buf) => {
                 let (n, peer) = received?;
                 if n == 0 || n > MAX_CONTROL_DATAGRAM { continue; }
-                let Ok(ControlMessage::Discover { version, nonce }) = serde_json::from_slice(&buf[..n]) else { continue };
-                if version != CONTROL_VERSION { continue; }
-
-                let mut response_node = announcement.clone();
-                response_node.nonce = nonce;
-                let response = serde_json::to_vec(&ControlMessage::Announce(response_node))?;
-                if response.len() <= MAX_CONTROL_DATAGRAM {
-                    socket.send_to(&response, peer).await?;
+                let Ok(message) = serde_json::from_slice::<ControlMessage>(&buf[..n]) else { continue };
+                match message {
+                    ControlMessage::Discover { version, nonce } if version == CONTROL_VERSION => {
+                        let mut response_node = announcement.clone();
+                        response_node.nonce = nonce;
+                        let response = serde_json::to_vec(&ControlMessage::Announce(response_node))?;
+                        if response.len() <= MAX_CONTROL_DATAGRAM {
+                            socket.send_to(&response, peer).await?;
+                        }
+                    }
+                    ControlMessage::TensorOffer { offer } => {
+                        let Some(key) = cluster_key.as_deref() else {
+                            println!("Ignoring tensor offer from {}: AITP_CLUSTER_KEY is not configured.", peer);
+                            continue;
+                        };
+                        let admission = offer_admission.admit(&offer, peer, key, Instant::now());
+                        let (accepted, reason) = match admission {
+                            Ok(()) => (true, None),
+                            Err(reason) => (false, Some(reason.to_string())),
+                        };
+                        let mut reply = TensorOfferReply {
+                            version: CONTROL_VERSION,
+                            receiver_node_id: node_id.clone(),
+                            sender_node_id: offer.sender_node_id.clone(),
+                            sequence: offer.sequence,
+                            message_id: offer.message_id,
+                            tensor_id: offer.descriptor.tensor_id,
+                            accepted,
+                            reason,
+                            auth_tag: Vec::new(),
+                        };
+                        auth::sign_tensor_offer_reply(&mut reply, key)?;
+                        let response = serde_json::to_vec(&ControlMessage::TensorOfferReply { reply })?;
+                        if response.len() <= MAX_CONTROL_DATAGRAM {
+                            socket.send_to(&response, peer).await?;
+                        }
+                        if accepted {
+                            println!(
+                                "Admitted tensor metadata '{}' from {} ({} bytes); no payload allocated.",
+                                offer.descriptor.name, peer, offer.descriptor.byte_len
+                            );
+                        }
+                    }
+                    _ => {}
                 }
             }
         }

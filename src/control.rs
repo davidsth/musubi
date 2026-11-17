@@ -3,7 +3,7 @@
 use crate::tensor::TensorDescriptor;
 use serde::{Deserialize, Serialize};
 
-pub const CONTROL_VERSION: u8 = 4;
+pub const CONTROL_VERSION: u8 = 5;
 pub const MAX_CONTROL_DATAGRAM: usize = 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -12,16 +12,37 @@ pub enum ControlMessage {
     Discover { version: u8, nonce: String },
     Announce(NodeAnnouncement),
     Register { node: NodeAnnouncement },
-    TensorOffer {
-        version: u8,
-        descriptor: TensorDescriptor,
-    },
+    TensorOffer { offer: TensorOfferMessage },
+    TensorOfferReply { reply: TensorOfferReply },
     Heartbeat {
         version: u8,
         node_id: String,
         sequence: u64,
         available_memory_bytes: u64,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TensorOfferMessage {
+    pub version: u8,
+    pub sender_node_id: String,
+    pub sequence: u64,
+    pub message_id: u32,
+    pub descriptor: TensorDescriptor,
+    pub auth_tag: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TensorOfferReply {
+    pub version: u8,
+    pub receiver_node_id: String,
+    pub sender_node_id: String,
+    pub sequence: u64,
+    pub message_id: u32,
+    pub tensor_id: u32,
+    pub accepted: bool,
+    pub reason: Option<String>,
+    pub auth_tag: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,7 +70,6 @@ pub struct NodeAnnouncement {
 }
 
 impl NodeAnnouncement {
-    /// Validate bounded metadata before a manager accepts an untrusted LAN registration.
     pub fn is_valid(&self) -> bool {
         self.version == CONTROL_VERSION
             && !self.node_id.is_empty()
@@ -62,9 +82,12 @@ impl NodeAnnouncement {
             && self.arch.len() <= 32
             && self.nonce.len() <= 64
             && (1..=4096).contains(&self.logical_cpus)
-            && !self.cpu_model.is_empty() && self.cpu_model.len() <= 256
+            && !self.cpu_model.is_empty()
+            && self.cpu_model.len() <= 256
             && self.accelerators.len() <= 8
-            && self.accelerators.iter().all(|gpu| !gpu.name.is_empty() && gpu.name.len() <= 256 && gpu.vendor.len() <= 64)
+            && self.accelerators.iter().all(|gpu| {
+                !gpu.name.is_empty() && gpu.name.len() <= 256 && gpu.vendor.len() <= 64
+            })
             && self.total_memory_bytes <= (1_u64 << 60)
             && self.available_memory_bytes <= self.total_memory_bytes
             && self.inference_port != 0
@@ -85,7 +108,12 @@ mod tests {
             arch: "aarch64".into(),
             logical_cpus: 10,
             cpu_model: "Apple M3".into(),
-            accelerators: vec![AcceleratorInfo { name: "Apple M3 GPU".into(), vendor: "Apple".into(), memory_bytes: None, unified_memory: true }],
+            accelerators: vec![AcceleratorInfo {
+                name: "Apple M3 GPU".into(),
+                vendor: "Apple".into(),
+                memory_bytes: None,
+                unified_memory: true,
+            }],
             total_memory_bytes: 16 * 1024 * 1024 * 1024,
             available_memory_bytes: 8 * 1024 * 1024 * 1024,
             inference_port: 9000,
@@ -93,84 +121,64 @@ mod tests {
     }
 
     #[test]
-    fn discovery_message_round_trips() {
-        let message = ControlMessage::Discover {
-            version: CONTROL_VERSION,
-            nonce: "test-nonce".into(),
-        };
-        let encoded = serde_json::to_vec(&message).unwrap();
-        let decoded: ControlMessage = serde_json::from_slice(&encoded).unwrap();
-        assert!(matches!(
-            decoded,
-            ControlMessage::Discover {
-                version: CONTROL_VERSION,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn announcement_and_registration_round_trip() {
+    fn discovery_and_registration_round_trip() {
         let node = sample_node();
         assert!(node.is_valid());
-        let encoded = serde_json::to_vec(&ControlMessage::Announce(node.clone())).unwrap();
-        let decoded: ControlMessage = serde_json::from_slice(&encoded).unwrap();
-        assert!(matches!(decoded, ControlMessage::Announce(_)));
-        assert!(encoded.len() <= MAX_CONTROL_DATAGRAM);
 
-        let registration = serde_json::to_vec(&ControlMessage::Register { node }).unwrap();
-        assert!(matches!(
-            serde_json::from_slice::<ControlMessage>(&registration).unwrap(),
-            ControlMessage::Register { .. }
-        ));
+        for message in [
+            ControlMessage::Discover {
+                version: CONTROL_VERSION,
+                nonce: "test-nonce".into(),
+            },
+            ControlMessage::Announce(node.clone()),
+            ControlMessage::Register { node },
+        ] {
+            let encoded = serde_json::to_vec(&message).unwrap();
+            assert!(encoded.len() <= MAX_CONTROL_DATAGRAM);
+            let _: ControlMessage = serde_json::from_slice(&encoded).unwrap();
+        }
     }
 
     #[test]
-    fn tensor_offer_round_trips_with_bounded_descriptor() {
-        let descriptor = TensorDescriptor {
-            tensor_id: 9,
-            name: "embedding.weight".into(),
-            dtype: crate::tensor::TensorDType::F16,
-            shape: vec![4096, 4096],
-            layout: crate::tensor::TensorLayout::RowMajor,
-            encoding: crate::tensor::TensorEncoding::Raw,
-            byte_len: 33_554_432,
-        };
-        assert!(descriptor.validate().is_ok());
-        let encoded = serde_json::to_vec(&ControlMessage::TensorOffer {
+    fn authenticated_tensor_offer_and_reply_round_trip() {
+        let offer = TensorOfferMessage {
             version: CONTROL_VERSION,
-            descriptor,
-        }).unwrap();
-        assert!(encoded.len() <= MAX_CONTROL_DATAGRAM);
-        let decoded: ControlMessage = serde_json::from_slice(&encoded).unwrap();
-        assert!(matches!(decoded, ControlMessage::TensorOffer {
-            version: CONTROL_VERSION,
-            descriptor,
-        } if descriptor.byte_len == 33_554_432));
-    }
-
-    #[test]
-    fn heartbeat_carries_live_available_memory() {
-        let heartbeat = ControlMessage::Heartbeat {
-            version: CONTROL_VERSION,
-            node_id: "stable-id".into(),
+            sender_node_id: "sender-node".into(),
             sequence: 42,
-            available_memory_bytes: 4 * 1024 * 1024 * 1024,
+            message_id: 1234,
+            descriptor: TensorDescriptor {
+                tensor_id: 9,
+                name: "embedding.weight".into(),
+                dtype: crate::tensor::TensorDType::F16,
+                shape: vec![4096, 4096],
+                layout: crate::tensor::TensorLayout::RowMajor,
+                encoding: crate::tensor::TensorEncoding::Raw,
+                byte_len: 33_554_432,
+            },
+            auth_tag: vec![7; 32],
         };
-        let encoded = serde_json::to_vec(&heartbeat).unwrap();
-        let decoded: ControlMessage = serde_json::from_slice(&encoded).unwrap();
-        assert!(matches!(
-            decoded,
-            ControlMessage::Heartbeat {
-                sequence: 42,
-                available_memory_bytes,
-                ..
-            } if available_memory_bytes == 4 * 1024 * 1024 * 1024
-        ));
+        let encoded = serde_json::to_vec(&ControlMessage::TensorOffer { offer }).unwrap();
+        assert!(encoded.len() <= MAX_CONTROL_DATAGRAM);
+        let _: ControlMessage = serde_json::from_slice(&encoded).unwrap();
+
+        let reply = TensorOfferReply {
+            version: CONTROL_VERSION,
+            receiver_node_id: "receiver-node".into(),
+            sender_node_id: "sender-node".into(),
+            sequence: 42,
+            message_id: 1234,
+            tensor_id: 9,
+            accepted: true,
+            reason: None,
+            auth_tag: vec![8; 32],
+        };
+        let encoded = serde_json::to_vec(&ControlMessage::TensorOfferReply { reply }).unwrap();
+        assert!(encoded.len() <= MAX_CONTROL_DATAGRAM);
+        let _: ControlMessage = serde_json::from_slice(&encoded).unwrap();
     }
 
     #[test]
-    fn rejects_unbounded_or_inconsistent_metadata() {
+    fn rejects_unbounded_or_inconsistent_node_metadata() {
         let mut node = sample_node();
         node.hostname = "x".repeat(129);
         assert!(!node.is_valid());

@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.6.0 — Authenticated tensor-offer admission
+
+- Added HMAC-SHA256 authentication for tensor-offer requests and replies using a shared 32+ byte AITP_CLUSTER_KEY.
+- Added worker-side descriptor validation, a 1 GiB per-offer ceiling, a 32-entry pending queue, a 30-second expiry, and per-sender replay-sequence checks.
+- Added an offer CLI command that submits a JSON descriptor and verifies the worker's signed reply.
+- Persisted offer sequence counters alongside the persistent node identity.
+- Kept tensor bytes off the control plane; no payload buffers are allocated and the 32-byte data-plane header is unchanged.
+- Bumped the control-plane version to 5.
+- Added HMAC, replay, admission-limit, expiry, and control-message serialization tests.
+
 ## v0.5.0 — Typed tensor descriptors
 
 - Added bounded tensor metadata with dtype, shape, layout, storage encoding, tensor ID, and exact byte length.

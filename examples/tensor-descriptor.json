@@ -1,0 +1,9 @@
+{
+  "tensor_id": 7,
+  "name": "layer.0.attn.q.weight",
+  "dtype": "f16",
+  "shape": [4096, 4096],
+  "layout": "row_major",
+  "encoding": "raw",
+  "byte_len": 33554432
+}

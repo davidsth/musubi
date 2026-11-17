@@ -90,20 +90,43 @@ Datagrams are capped at 1200 bytes to reduce IP fragmentation risk. Payload chun
 
 AITP now defines a bounded `TensorDescriptor` schema for the worker-execution milestone. A descriptor carries the tensor ID (matching the existing 32-byte data-plane header), name, logical dtype, shape, layout, storage encoding, and exact byte length. Raw F32/F16/BF16/integer storage is supported, along with initial GGML Q4_0, Q4_1, Q5_0, Q5_1, and Q8_0 block-size calculations. Descriptors are validated with checked arithmetic, a maximum rank of 8, and a 1 TiB safety ceiling.
 
-`ControlMessage::TensorOffer` defines the versioned control-plane envelope for advertising a descriptor before sending its bytes. This is currently a schema and validation increment: the node agent does not yet accept offers, allocate tensor buffers, or dispatch worker execution. Tensor bytes continue to travel over the existing binary data plane; the 32-byte header is unchanged.
+`ControlMessage::TensorOffer` carries an authenticated metadata offer. The node agent verifies its HMAC, descriptor size, sender sequence, and bounded pending-queue capacity, then returns a signed admission reply. The data plane remains separate and the 32-byte header is unchanged; this milestone does not allocate tensor buffers or receive payload bytes.
+
+## Authenticated tensor-offer admission v0.6
+
+A node validates incoming tensor metadata offers when the AITP_CLUSTER_KEY environment variable is configured. Use the same random secret (at least 32 bytes) on the sender and worker. Generate one with openssl rand -hex 32 and set it in both process environments.
+
+macOS/Linux:
+
+    export AITP_CLUSTER_KEY="paste-the-same-secret-on-each-machine"
+    cargo run --release -- node --bind 0.0.0.0:9001 --data-port 9000
+
+Windows PowerShell:
+
+    $env:AITP_CLUSTER_KEY = "paste-the-same-secret-on-each-machine"
+    cargo run --release -- node --bind 0.0.0.0:9001 --data-port 9000
+
+Submit a descriptor from another machine:
+
+    cargo run --release -- offer --target 192.168.1.50:9001 --descriptor examples/tensor-descriptor.json
+
+The sender uses its persistent node ID and a persisted, increasing offer sequence under ~/.aitp (or %APPDATA%\aitp on Windows). Offers and replies use HMAC-SHA256. The worker rejects invalid signatures, stale sequences, duplicate pending message IDs, invalid descriptors, descriptors over 1 GiB, and offers exceeding its 32-entry pending metadata queue. Pending offers expire after 30 seconds.
+
+**This milestone admits metadata only.** It does not allocate a tensor buffer, create a file, receive tensor bytes, execute code, or load a model. The existing generic send/receive commands remain separate and are not yet connected to the authenticated offer path. The authenticated data-plane binding is the next milestone.
 
 ## Current limitations
 
 - ACK/retry is basic and uses batches of up to 512 chunks.
-- No congestion control, packet pacing, authentication, encryption, selective ACK ranges, adaptive MTU, or multi-transfer multiplexing.
+- No congestion control, packet pacing, encryption, selective ACK ranges, adaptive MTU, or multi-transfer multiplexing. HMAC authentication currently protects tensor-offer control messages only.
 - UDP reliability is experimental; this implementation is not a replacement for a mature congestion-controlled transport.
 - Receiver handles one active transfer and writes to one output path.
 - Sender reads the input file into memory.
-- Discovery, registration, and heartbeat messages are unauthenticated. Use only on trusted LANs.
+- Discovery, registration, and heartbeat messages remain unauthenticated. HMAC does not encrypt metadata or protect against a compromised endpoint. Offer replay counters are held in worker memory and reset when that worker restarts. Use only on a trusted LAN.
 - Manager inventory is in-memory and is lost when the manager restarts.
 - The manager does not authenticate node IDs; a device on the LAN can attempt to register a claimed ID.
 - Heartbeat liveness is based on sequence-numbered messages and a configurable timeout, not cryptographic identity.
-- No tensor schema negotiation, inference-runtime integration, GPU-direct networking, RDMA, or zero-copy path.
+- The generic send/receive path is not yet bound to admitted descriptors; there is no authenticated tensor payload receiver or worker buffer allocation yet.
+- No inference-runtime integration, GPU-direct networking, RDMA, or zero-copy path.
 - Hardware inventory includes CPU model, OS, architecture, logical CPU count, total RAM, periodically refreshed available RAM, and best-effort accelerator names/vendors/memory. NVIDIA VRAM is reported when nvidia-smi is installed. Apple Silicon is represented as an integrated GPU sharing unified system memory. Some platform probes identify devices without reliable VRAM data. Compute capability, utilization, and measured throughput are not yet reported.
 
 ## Roadmap
@@ -111,16 +134,17 @@ AITP now defines a bounded `TensorDescriptor` schema for the worker-execution mi
 1. Add congestion control, pacing, selective acknowledgments, and robust transfer IDs.
 2. Add persistent node identities, heartbeats, and disconnect detection. (Implemented in v0.3.)
 3. Report CPU model and best-effort GPU/accelerator inventory. (Initial probes added in v0.4.)
-4. Define and validate tensor descriptors and control-plane offers. (Initial schema added in v0.5.)
-5. Implement authenticated/authorized worker tensor-offer handling and bounded receive allocation.
-6. Integrate one inference backend (llama.cpp on CPU first) and execute a remote layer on a worker.
-7. Implement pipeline partitioning: place contiguous transformer layer ranges on workers, transfer activations, and stream generated tokens.
-8. Add automatic memory-aware placement, then GPU/Metal/CUDA acceleration and performance tuning.
-9. Add authentication, congestion control, and benchmarking.
+4. Define and validate tensor descriptors and control-plane offers. (Schema added in v0.5.)
+5. Authenticate and bound worker tensor-offer admission. (Initial metadata-only path added in v0.6.)
+6. Bind accepted offers to an authenticated, bounded tensor receive path without changing the 32-byte data-plane header.
+7. Integrate one inference backend (llama.cpp on CPU first) and execute a remote layer on a worker.
+8. Implement pipeline partitioning: place contiguous transformer layer ranges on workers, transfer activations, and stream generated tokens.
+9. Add automatic memory-aware placement, then GPU/Metal/CUDA acceleration and performance tuning.
+10. Add control-plane authentication, congestion control, and benchmarking.
 
 ## Security
 
-The current control plane is unauthenticated and exposes basic machine metadata to devices on the local network. The transfer receiver is also a prototype and should only be used on trusted networks. Authentication, encryption, rate limiting, and robust resource limits are future work.
+Most control-plane messages and the generic transfer receiver remain unauthenticated. Tensor offers alone use HMAC-SHA256 with a shared environment-provided key; this provides integrity/authentication but not confidentiality. Use a trusted LAN. The next data-plane milestone must authenticate every payload packet and enforce allocation/disk limits before accepting bytes.
 
 ## License
 
