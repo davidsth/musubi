@@ -1,5 +1,6 @@
 mod auth;
 mod control;
+mod dashboard;
 mod hardware;
 mod protocol;
 mod tensor;
@@ -53,7 +54,9 @@ enum Command {
                #[arg(long, default_value_t = 1500)] wait_ms: u64 },
     /// Run a cluster manager that tracks registrations and node liveness.
     Manager { #[arg(long, default_value = "0.0.0.0:9002")] bind: SocketAddr,
-              #[arg(long, default_value_t = 5000)] timeout_ms: u64 },
+              #[arg(long, default_value_t = 5000)] timeout_ms: u64,
+              /// HTTP dashboard bind address. Defaults to localhost for safety.
+              #[arg(long, default_value = "127.0.0.1:9003")] dashboard_bind: SocketAddr },
 }
 
 #[tokio::main]
@@ -67,8 +70,8 @@ async fn main() -> Result<()> {
             run_node(bind, data_port, name, manager, heartbeat_ms).await,
         Command::Discover { target, wait_ms } =>
             discover(target, Duration::from_millis(wait_ms)).await,
-        Command::Manager { bind, timeout_ms } =>
-            run_manager(bind, Duration::from_millis(timeout_ms.max(500))).await,
+        Command::Manager { bind, timeout_ms, dashboard_bind } =>
+            run_manager(bind, Duration::from_millis(timeout_ms.max(500)), dashboard_bind).await,
     }
 }
 
@@ -389,6 +392,35 @@ async fn run_node(
             }
             _ = offer_reap.tick() => {
                 offer_admission.expire(Instant::now());
+                let mut snapshot_nodes = Vec::with_capacity(nodes.len());
+                let mut online_nodes = 0usize;
+                for (id, node) in &nodes {
+                    let age = node.last_seen.elapsed();
+                    let online = age <= offline_after;
+                    if online { online_nodes += 1; }
+                    snapshot_nodes.push(dashboard::DashboardNode {
+                        node_id: id.clone(),
+                        hostname: node.announcement.hostname.clone(),
+                        address: node.address.to_string(),
+                        os: node.announcement.os.clone(),
+                        arch: node.announcement.arch.clone(),
+                        cpu_model: node.announcement.cpu_model.clone(),
+                        logical_cpus: node.announcement.logical_cpus,
+                        total_memory_bytes: node.announcement.total_memory_bytes,
+                        available_memory_bytes: node.announcement.available_memory_bytes,
+                        accelerators: node.announcement.accelerators.clone(),
+                        online,
+                        last_seen_secs: age.as_secs(),
+                    });
+                }
+                snapshot_nodes.sort_by(|a, b| a.hostname.cmp(&b.hostname));
+                *dashboard_snapshot.write().await = dashboard::ClusterSnapshot {
+                    nodes: snapshot_nodes,
+                    online_nodes,
+                    offline_nodes: nodes.len().saturating_sub(online_nodes),
+                    updated_at_unix: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
+                };
             }
             received = socket.recv_from(&mut buf) => {
                 let (n, peer) = received?;
@@ -451,10 +483,18 @@ struct ManagedNode {
     last_sequence: u64,
 }
 
-async fn run_manager(bind: SocketAddr, offline_after: Duration) -> Result<()> {
+async fn run_manager(bind: SocketAddr, offline_after: Duration, dashboard_bind: SocketAddr) -> Result<()> {
     let socket = UdpSocket::bind(bind).await?;
+    let dashboard_snapshot = dashboard::shared_snapshot();
+    let dashboard_state = dashboard_snapshot.clone();
+    tokio::spawn(async move {
+        if let Err(error) = dashboard::serve(dashboard_bind, dashboard_state).await {
+            eprintln!("AITP dashboard stopped: {error:#}");
+        }
+    });
     println!("AITP cluster manager listening on {}", socket.local_addr()?);
     println!("Nodes are marked OFFLINE after {} ms without a heartbeat.", offline_after.as_millis());
+    println!("Dashboard is read-only and defaults to localhost; use --dashboard-bind to expose it on a trusted LAN.");
 
     let mut nodes: HashMap<String, ManagedNode> = HashMap::new();
     let mut buf = [0u8; MAX_CONTROL_DATAGRAM];
