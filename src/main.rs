@@ -392,35 +392,7 @@ async fn run_node(
             }
             _ = offer_reap.tick() => {
                 offer_admission.expire(Instant::now());
-                let mut snapshot_nodes = Vec::with_capacity(nodes.len());
-                let mut online_nodes = 0usize;
-                for (id, node) in &nodes {
-                    let age = node.last_seen.elapsed();
-                    let online = age <= offline_after;
-                    if online { online_nodes += 1; }
-                    snapshot_nodes.push(dashboard::DashboardNode {
-                        node_id: id.clone(),
-                        hostname: node.announcement.hostname.clone(),
-                        address: node.address.to_string(),
-                        os: node.announcement.os.clone(),
-                        arch: node.announcement.arch.clone(),
-                        cpu_model: node.announcement.cpu_model.clone(),
-                        logical_cpus: node.announcement.logical_cpus,
-                        total_memory_bytes: node.announcement.total_memory_bytes,
-                        available_memory_bytes: node.announcement.available_memory_bytes,
-                        accelerators: node.announcement.accelerators.clone(),
-                        online,
-                        last_seen_secs: age.as_secs(),
-                    });
-                }
-                snapshot_nodes.sort_by(|a, b| a.hostname.cmp(&b.hostname));
-                *dashboard_snapshot.write().await = dashboard::ClusterSnapshot {
-                    nodes: snapshot_nodes,
-                    online_nodes,
-                    offline_nodes: nodes.len().saturating_sub(online_nodes),
-                    updated_at_unix: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
-                };
+                
             }
             received = socket.recv_from(&mut buf) => {
                 let (n, peer) = received?;
@@ -521,6 +493,35 @@ async fn run_manager(bind: SocketAddr, offline_after: Duration, dashboard_bind: 
                         for gpu in &node.announcement.accelerators { println!("    GPU: {} ({}, {})", gpu.name, gpu.vendor, hardware::memory_label(gpu)); }
                     }
                 }
+                let mut snapshot_nodes = Vec::with_capacity(nodes.len());
+                let mut online_nodes = 0usize;
+                for (id, node) in &nodes {
+                    let age = node.last_seen.elapsed();
+                    let online = age <= offline_after;
+                    if online { online_nodes += 1; }
+                    snapshot_nodes.push(dashboard::DashboardNode {
+                        node_id: id.clone(),
+                        hostname: node.announcement.hostname.clone(),
+                        address: node.address.to_string(),
+                        os: node.announcement.os.clone(),
+                        arch: node.announcement.arch.clone(),
+                        cpu_model: node.announcement.cpu_model.clone(),
+                        logical_cpus: node.announcement.logical_cpus,
+                        total_memory_bytes: node.announcement.total_memory_bytes,
+                        available_memory_bytes: node.announcement.available_memory_bytes,
+                        accelerators: node.announcement.accelerators.clone(),
+                        online,
+                        last_seen_secs: age.as_secs(),
+                    });
+                }
+                snapshot_nodes.sort_by(|a, b| a.hostname.cmp(&b.hostname));
+                *dashboard_snapshot.write().await = dashboard::ClusterSnapshot {
+                    nodes: snapshot_nodes,
+                    online_nodes,
+                    offline_nodes: nodes.len().saturating_sub(online_nodes),
+                    updated_at_unix: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
+                };
             }
             received = socket.recv_from(&mut buf) => {
                 let (n, peer) = received?;
