@@ -1,12 +1,13 @@
 [package]
 name = "aitp"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 description = "Experimental low-overhead transport for distributed LLM inference"
 license = "MIT"
 
 [dependencies]
 anyhow = "1"
+axum = "0.7"
 clap = { version = "4", features = ["derive"] }
 crc32fast = "1"
 hmac = "0.12"
