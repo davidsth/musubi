@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.7.0 — Read-only cluster dashboard
+
+- Added a responsive web dashboard served by the cluster manager over HTTP.
+- Added a read-only JSON snapshot endpoint at /api/cluster with node status, addresses, CPU, RAM, accelerator inventory, and heartbeat age.
+- Dashboard refreshes every two seconds and reports online/offline node counts and aggregate CPU/RAM.
+- Dashboard binds to 127.0.0.1:9003 by default; LAN exposure requires an explicit --dashboard-bind override.
+- Kept dashboard/control-plane HTTP separate from the UDP tensor data plane.
+- Added dashboard snapshot serialization and static UI smoke tests.
+- No remote execution, workload-control endpoints, or tensor transfer behavior added.
+
 ## v0.6.0 — Authenticated tensor-offer admission
 
 - Added HMAC-SHA256 authentication for tensor-offer requests and replies using a shared 32+ byte AITP_CLUSTER_KEY.
