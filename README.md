@@ -20,6 +20,10 @@ Start the manager on one machine:
 
     cargo run --release -- manager --bind 0.0.0.0:9002 --timeout-ms 5000
 
+Open the read-only cluster dashboard at http://127.0.0.1:9003. The HTTP listener binds to localhost by default. To view it from another trusted LAN machine, explicitly set `--dashboard-bind 0.0.0.0:9003` and allow TCP port 9003 through the manager firewall. Do not expose the dashboard to the public internet.
+
+The dashboard polls `/api/cluster` every two seconds and displays registered nodes, online/offline state, CPU model/core count, total and available RAM, accelerator inventory, node address, and heartbeat age. It has no workload-control or remote-execution endpoints.
+
 The manager accepts node registrations and periodic heartbeats. It prints a cluster inventory and marks nodes OFFLINE when no heartbeat has arrived within the configured timeout.
 
 ## Join a node to the manager
@@ -114,6 +118,10 @@ The sender uses its persistent node ID and a persisted, increasing offer sequenc
 
 **This milestone admits metadata only.** It does not allocate a tensor buffer, create a file, receive tensor bytes, execute code, or load a model. The existing generic send/receive commands remain separate and are not yet connected to the authenticated offer path. The authenticated data-plane binding is the next milestone.
 
+## Cluster dashboard v0.7
+
+The manager serves a responsive, read-only web dashboard over HTTP. The dashboard is intentionally separate from the UDP tensor data plane and reads a snapshot of the manager's in-memory node inventory. It does not issue commands to nodes, allocate workloads, or execute code. The default bind is localhost; LAN exposure requires an explicit bind-address override. The dashboard currently has no authentication or TLS, so keep it on localhost or a trusted isolated LAN.
+
 ## Current limitations
 
 - ACK/retry is basic and uses batches of up to 512 chunks.
@@ -141,6 +149,7 @@ The sender uses its persistent node ID and a persisted, increasing offer sequenc
 8. Implement pipeline partitioning: place contiguous transformer layer ranges on workers, transfer activations, and stream generated tokens.
 9. Add automatic memory-aware placement, then GPU/Metal/CUDA acceleration and performance tuning.
 10. Add control-plane authentication, congestion control, and benchmarking.
+11. Add a cluster dashboard for live node inventory. (Initial read-only dashboard added in v0.7.)
 
 ## Security
 
