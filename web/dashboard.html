@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AITP · Cluster</title>
+<style>
+:root{color-scheme:dark;--bg:#0b1020;--panel:#121a2c;--line:#25334b;--muted:#91a0b8;--text:#e8eef8;--cyan:#55d6d0;--green:#55d69a;--amber:#f3bd63;--red:#f07878}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 10% 0%,#172744 0,transparent 42%),var(--bg);color:var(--text);font:14px/1.5 Inter,ui-sans-serif,system-ui,sans-serif}
+main{max-width:1280px;margin:auto;padding:34px 28px 60px}.top{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:28px}
+.brand{display:flex;align-items:center;gap:13px}.mark{width:42px;height:42px;border:1px solid #3a6475;border-radius:13px;display:grid;place-items:center;color:var(--cyan);font-weight:800;font-size:19px;background:#122b3a}
+h1{font-size:22px;margin:0;letter-spacing:-.5px}.sub{color:var(--muted);font-size:12px}.live{color:var(--green);font-size:12px;display:flex;align-items:center;gap:8px}.dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 12px var(--green)}
+.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:18px}.panel,.metric{background:linear-gradient(145deg,#151f33,#101827);border:1px solid var(--line);border-radius:15px}.metric{padding:18px}.metric .label{color:var(--muted);font-size:12px}.metric .value{font-size:27px;font-weight:650;letter-spacing:-1px;margin-top:5px}.metric .hint{color:var(--muted);font-size:11px;margin-top:2px}
+.panel{padding:20px}.section-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}.section-head h2{font-size:15px;margin:0}.muted{color:var(--muted)}.node-list{display:grid;gap:12px}.node{border:1px solid var(--line);border-radius:12px;padding:16px;background:#0e1727}.node-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.node-name{font-weight:650;font-size:15px}.node-meta{color:var(--muted);font-size:12px;margin-top:3px}.status{font-size:10px;letter-spacing:.08em;padding:4px 8px;border-radius:20px;background:#123126;color:var(--green);border:1px solid #235b45}.status.off{background:#35251c;color:var(--amber);border-color:#6a482b}
+.specs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:15px}.spec{background:#121e30;border-radius:9px;padding:10px 12px}.spec small{display:block;color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.07em}.spec strong{display:block;margin-top:4px;font-size:13px;font-weight:600;overflow-wrap:anywhere}
+.bar{height:5px;border-radius:5px;background:#26344a;margin-top:8px;overflow:hidden}.bar i{display:block;height:100%;background:linear-gradient(90deg,#38b9ba,#62e0b0);border-radius:5px}.gpu{color:#b9c9e0;font-size:12px;margin-top:12px}.empty{padding:46px 15px;text-align:center;color:var(--muted)}.empty b{display:block;color:var(--text);font-size:15px;margin-bottom:5px}
+footer{margin-top:18px;color:#71829d;font-size:11px;display:flex;justify-content:space-between;gap:12px}
+@media(max-width:760px){main{padding:22px 15px}.metrics{grid-template-columns:repeat(2,1fr)}.specs{grid-template-columns:1fr 1fr}.top{align-items:flex-start;flex-direction:column}}@media(max-width:430px){.specs{grid-template-columns:1fr}}
+</style></head>
+<body><main>
+<header class="top"><div class="brand"><div class="mark">A</div><div><h1>AITP Cluster</h1><div class="sub">AI Transport Protocol · Node monitor</div></div></div><div class="live"><span class="dot"></span><span id="connection">Connecting to manager</span></div></header>
+<section class="metrics">
+<div class="metric"><div class="label">TOTAL NODES</div><div class="value" id="total">—</div><div class="hint">Registered in this manager</div></div>
+<div class="metric"><div class="label">ONLINE</div><div class="value" id="online" style="color:var(--green)">—</div><div class="hint">Heartbeat within timeout</div></div>
+<div class="metric"><div class="label">LOGICAL CPU CORES</div><div class="value" id="cpus">—</div><div class="hint">Across registered nodes</div></div>
+<div class="metric"><div class="label">AVAILABLE MEMORY</div><div class="value" id="memory">—</div><div class="hint" id="memory-hint">Across registered nodes</div></div>
+</section>
+<section class="panel"><div class="section-head"><h2>Compute nodes</h2><span class="muted" id="updated">Waiting for first update…</span></div><div class="node-list" id="nodes"><div class="empty"><b>No cluster data yet</b>Start AITP node agents and register them with this manager.</div></div></section>
+<footer><span>Read-only dashboard · Control plane only</span><span>Refreshes every 2 seconds</span></footer>
+</main>
+<script>
+const GiB=1024**3,fmt=n=>Number(n||0).toLocaleString(),gib=n=>(n/GiB).toFixed(1)+' GiB';
+function render(s){const ns=s.nodes||[];document.querySelector('#total').textContent=ns.length;document.querySelector('#online').textContent=s.online_nodes??ns.filter(n=>n.online).length;document.querySelector('#cpus').textContent=fmt(ns.reduce((a,n)=>a+n.logical_cpus,0));const avail=ns.reduce((a,n)=>a+n.available_memory_bytes,0),total=ns.reduce((a,n)=>a+n.total_memory_bytes,0);document.querySelector('#memory').textContent=gib(avail);document.querySelector('#memory-hint').textContent='of '+gib(total)+' total RAM';document.querySelector('#updated').textContent='Updated '+new Date().toLocaleTimeString();const root=document.querySelector('#nodes');if(!ns.length){root.innerHTML='<div class="empty"><b>No nodes registered</b>Start an AITP node agent and point it at this manager.</div>';return}root.innerHTML=ns.map(n=>{const used=Math.max(0,Math.min(100,100*n.available_memory_bytes/Math.max(1,n.total_memory_bytes)));const g=(n.accelerators||[]).map(x=>x.name+' · '+x.vendor+(x.unified_memory?' · unified memory':x.memory_bytes?' · '+gib(x.memory_bytes):'')).join('<br>');return '<article class="node"><div class="node-head"><div><div class="node-name">'+esc(n.hostname)+'</div><div class="node-meta">'+esc(n.address)+' · '+esc(n.os)+' / '+esc(n.arch)+' · '+esc(n.node_id)+'</div></div><span class="status '+(n.online?'':'off')+'">'+(n.online?'ONLINE':'OFFLINE')+'</span></div><div class="specs"><div class="spec"><small>Processor</small><strong>'+esc(n.cpu_model)+' · '+fmt(n.logical_cpus)+' threads</strong></div><div class="spec"><small>Memory available</small><strong>'+gib(n.available_memory_bytes)+' / '+gib(n.total_memory_bytes)+'</strong><div class="bar"><i style="width:'+used+'%"></i></div></div><div class="spec"><small>Last heartbeat</small><strong>'+fmt(n.last_seen_secs)+'s ago</strong></div></div>'+(g?'<div class="gpu">⌁ '+g+'</div>':'')+'</article>'}).join('')}
+function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+async function poll(){try{const r=await fetch('/api/cluster',{cache:'no-store'});if(!r.ok)throw Error(r.status);render(await r.json());document.querySelector('#connection').textContent='Manager connected'}catch(e){document.querySelector('#connection').textContent='Manager unavailable'}}
+poll();setInterval(poll,2000);
+</script></body></html>
