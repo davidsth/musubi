@@ -367,8 +367,24 @@ async fn run_node(
     heartbeat_ms: u64,
 ) -> Result<()> {
     let cluster_key = auth::cluster_key_from_env()?;
+    if data_port == 0 {
+        bail!("data port must be nonzero");
+    }
     let socket = UdpSocket::bind(bind).await?;
     let node_id = persistent_node_id()?;
+    let offer_admission = Arc::new(Mutex::new(OfferAdmission::default()));
+    if let Some(key) = cluster_key.clone() {
+        let data_bind = SocketAddr::new(bind.ip(), data_port);
+        let data_socket = UdpSocket::bind(data_bind)
+            .await
+            .with_context(|| format!("binding authenticated tensor data port {data_bind}"))?;
+        let admission_state = offer_admission.clone();
+        tokio::spawn(async move {
+            if let Err(error) = tensor_transfer::run_receiver(data_socket, key, admission_state).await {
+                eprintln!("AITP authenticated tensor receiver stopped: {error:#}");
+            }
+        });
+    }
     let hostname = name.unwrap_or_else(local_hostname);
     let logical_cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     let mut system = System::new_all();
@@ -403,9 +419,9 @@ async fn run_node(
     for gpu in &accelerators { println!("Accelerator: {} ({}, {})", gpu.name, gpu.vendor, hardware::memory_label(gpu)); }
     if accelerators.is_empty() { println!("No GPU probe found. Apple Silicon GPU shares unified system memory."); }
     if cluster_key.is_some() {
-        println!("Authenticated tensor-offer admission is enabled (metadata only).");
+        println!("Authenticated tensor offers and bounded tensor reception are enabled.");
     } else {
-        println!("Tensor offers are disabled; set AITP_CLUSTER_KEY on trusted cluster nodes to enable them.");
+        println!("Tensor offers and tensor reception are disabled; set AITP_CLUSTER_KEY on trusted cluster nodes to enable them.");
     }
     println!("No remote command execution is supported.");
 
@@ -417,7 +433,6 @@ async fn run_node(
 
     let mut heartbeat = tokio::time::interval(Duration::from_millis(heartbeat_ms.max(100)));
     let mut sequence = 0u64;
-    let mut offer_admission = OfferAdmission::default();
     let mut offer_reap = tokio::time::interval(Duration::from_secs(1));
     let mut buf = [0u8; MAX_CONTROL_DATAGRAM];
 
@@ -440,7 +455,7 @@ async fn run_node(
                 }
             }
             _ = offer_reap.tick() => {
-                offer_admission.expire(Instant::now());
+                offer_admission.lock().await.expire(Instant::now());
                 
             }
             received = socket.recv_from(&mut buf) => {
@@ -461,7 +476,7 @@ async fn run_node(
                             println!("Ignoring tensor offer from {}: AITP_CLUSTER_KEY is not configured.", peer);
                             continue;
                         };
-                        let admission = offer_admission.admit(&offer, peer, key, Instant::now());
+                        let admission = offer_admission.lock().await.admit(&offer, peer, key, Instant::now());
                         let (accepted, reason) = match admission {
                             Ok(()) => (true, None),
                             Err(reason) => (false, Some(reason.to_string())),
