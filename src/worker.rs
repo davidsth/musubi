@@ -127,6 +127,32 @@ impl OfferAdmission {
         before - self.pending.len()
     }
 
+    /// Locate a pending reservation by the observed UDP peer and binary transfer IDs.
+    /// Ambiguous matches are rejected rather than guessing which offer owns the bytes.
+    pub fn pending_for_peer(
+        &self,
+        peer: SocketAddr,
+        message_id: u32,
+        tensor_id: u32,
+    ) -> Option<PendingTensorOffer> {
+        let mut matches = self.pending.values().filter(|pending| {
+            pending.peer == peer
+                && pending.offer.message_id == message_id
+                && pending.offer.descriptor.tensor_id == tensor_id
+        });
+        let first = matches.next()?.clone();
+        if matches.next().is_some() {
+            None
+        } else {
+            Some(first)
+        }
+    }
+
+    /// Consume the metadata reservation once the corresponding tensor is committed.
+    pub fn remove_pending(&mut self, sender_node_id: &str, message_id: u32) -> Option<PendingTensorOffer> {
+        self.pending.remove(&(sender_node_id.to_owned(), message_id))
+    }
+
     pub fn pending_count(&self) -> usize {
         self.pending.len()
     }
@@ -207,6 +233,21 @@ mod tests {
         admission.admit(&first, peer(), &key, now).unwrap();
         let second = signed_offer(&key, "sender-b", 1, 103, 32);
         assert!(admission.admit(&second, peer(), &key, now).is_err());
+    }
+
+    #[test]
+    fn pending_offer_is_bound_to_peer_and_transfer_ids() {
+        let key = [0x42; 32];
+        let now = Instant::now();
+        let offer = signed_offer(&key, "sender-a", 1, 101, 64);
+        let mut admission = OfferAdmission::default();
+        admission.admit(&offer, peer(), &key, now).unwrap();
+        assert!(admission.pending_for_peer(peer(), 101, 7).is_some());
+        assert!(admission.pending_for_peer(peer(), 102, 7).is_none());
+        assert!(admission.pending_for_peer(peer(), 101, 8).is_none());
+        assert!(admission.pending_for_peer("127.0.0.1:40001".parse().unwrap(), 101, 7).is_none());
+        assert!(admission.remove_pending("sender-a", 101).is_some());
+        assert_eq!(admission.pending_count(), 0);
     }
 
     #[test]
