@@ -9,6 +9,9 @@ pub const VERSION: u8 = 1;
 pub const HEADER_LEN: usize = 32;
 pub const MAX_DATAGRAM: usize = 1200;
 pub const MAX_PAYLOAD: usize = MAX_DATAGRAM - HEADER_LEN;
+/// Binary tensor datagrams append a 32-byte HMAC-SHA256 tag after the payload.
+pub const AUTH_TAG_LEN: usize = 32;
+pub const MAX_AUTH_PAYLOAD: usize = MAX_DATAGRAM - HEADER_LEN - AUTH_TAG_LEN;
 
 pub const KIND_DATA: u8 = 1;
 pub const KIND_ACK: u8 = 2;
@@ -73,6 +76,13 @@ pub fn checksum(payload: &[u8]) -> u32 { crc32fast::hash(payload) }
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authenticated_payload_stays_within_safe_datagram_size() {
+        assert_eq!(HEADER_LEN, 32);
+        assert_eq!(HEADER_LEN + MAX_AUTH_PAYLOAD + AUTH_TAG_LEN, MAX_DATAGRAM);
+        assert!(MAX_AUTH_PAYLOAD < MAX_PAYLOAD);
+    }
 
     #[test]
     fn header_is_exactly_32_bytes_and_round_trips() {
