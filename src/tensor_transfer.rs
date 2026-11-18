@@ -603,13 +603,16 @@ mod tests {
             output_dir.clone(),
         ));
 
-        let transfer_result =
-            send_tensor_data(&sender_socket, receiver_addr, &input, &offer, &key).await;
-        if let Err(error) = transfer_result {
+        let transfer_result = timeout(
+            Duration::from_secs(10),
+            send_tensor_data(&sender_socket, receiver_addr, &input, &offer, &key),
+        )
+        .await;
+        if !matches!(transfer_result, Ok(Ok(()))) {
             receiver.abort();
             let _ = receiver.await;
             let _ = fs::remove_dir_all(&root).await;
-            panic!("loopback tensor transfer failed: {error:#}");
+            panic!("loopback tensor transfer failed: {transfer_result:?}");
         }
         receiver.abort();
         let _ = receiver.await;
