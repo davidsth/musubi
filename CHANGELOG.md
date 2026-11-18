@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.8.0 — Authenticated tensor payload transfer
+
+- Connected authenticated tensor offers to a worker-side UDP data receiver.
+- Added the `send-tensor` CLI path: signed metadata admission followed by authenticated chunk transfer using the same sender socket/peer identity.
+- Preserved the existing 32-byte binary header; appended HMAC-SHA256 tags after payloads and kept authenticated datagrams at or below 1200 bytes.
+- Added exact file-size, per-chunk length, source endpoint, transfer ID, CRC32, HMAC, sequence-coverage, and final-length checks.
+- Added bounded temporary-file staging and final-name commit after complete verification; retained a 1 GiB per-tensor cap and one active transfer per worker.
+- Bounded duplicate-FIN response state to 256 completed transfers.
+- Added a multi-chunk loopback integration test that verifies committed bytes match the sender input.
+- No model loading, tensor allocator, or remote execution was introduced; UDP fixed-window retry is not congestion control.
+
 ## v0.7.0 — Read-only cluster dashboard
 
 - Added a responsive web dashboard served by the cluster manager over HTTP.
