@@ -65,7 +65,6 @@ struct CompletedTransfer {
 /// Bind this socket before spawning the task so port errors are reported to the node CLI.
 pub async fn run_receiver(
     socket: UdpSocket,
-    node_id: String,
     key: Vec<u8>,
     admission: Arc<Mutex<OfferAdmission>>,
 ) -> Result<()> {
@@ -250,7 +249,6 @@ pub async fn run_receiver(
                 }
             }
         }
-        let _ = node_id; // Reserved for future per-worker transfer metrics.
     }
 }
 
