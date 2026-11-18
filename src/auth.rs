@@ -93,6 +93,43 @@ pub fn sign_tensor_offer_reply(reply: &mut TensorOfferReply, key: &[u8]) -> Resu
     Ok(())
 }
 
+
+/// Produce a per-datagram tag for the binary tensor data plane. The fixed
+/// 32-byte header is authenticated as-is; the tag is appended after payload.
+pub fn tensor_packet_tag(
+    key: &[u8],
+    sender_node_id: &str,
+    offer_sequence: u64,
+    header: &crate::protocol::Header,
+    payload: &[u8],
+) -> Result<Vec<u8>> {
+    let mut mac = new_mac(key, b"AITP/TENSOR_PACKET/V1\0")?;
+    update_blob(&mut mac, sender_node_id.as_bytes());
+    mac.update(&offer_sequence.to_be_bytes());
+    mac.update(&header.encode());
+    update_blob(&mut mac, payload);
+    Ok(mac.finalize().into_bytes().to_vec())
+}
+
+pub fn verify_tensor_packet(
+    key: &[u8],
+    sender_node_id: &str,
+    offer_sequence: u64,
+    header: &crate::protocol::Header,
+    payload: &[u8],
+    tag: &[u8],
+) -> Result<bool> {
+    if tag.len() != HMAC_TAG_BYTES {
+        return Ok(false);
+    }
+    let mut mac = new_mac(key, b"AITP/TENSOR_PACKET/V1\0")?;
+    update_blob(&mut mac, sender_node_id.as_bytes());
+    mac.update(&offer_sequence.to_be_bytes());
+    mac.update(&header.encode());
+    update_blob(&mut mac, payload);
+    Ok(mac.verify_slice(tag).is_ok())
+}
+
 pub fn verify_tensor_offer_reply(reply: &TensorOfferReply, key: &[u8]) -> Result<bool> {
     if reply.auth_tag.len() != HMAC_TAG_BYTES {
         return Ok(false);
@@ -171,6 +208,25 @@ mod tests {
         assert!(verify_tensor_offer_reply(&reply, &key).unwrap());
         reply.accepted = true;
         assert!(!verify_tensor_offer_reply(&reply, &key).unwrap());
+    }
+
+
+    #[test]
+    fn tensor_packet_tag_binds_header_payload_and_offer() {
+        let key = [0x44; 32];
+        let header = crate::protocol::Header {
+            kind: crate::protocol::KIND_DATA, flags: 0, message_id: 9,
+            tensor_id: 7, sequence: 1, payload_len: 3,
+            checksum: crate::protocol::checksum(b"abc"), worker_id: 0,
+        };
+        let tag = tensor_packet_tag(&key, "sender", 12, &header, b"abc").unwrap();
+        assert!(verify_tensor_packet(&key, "sender", 12, &header, b"abc", &tag).unwrap());
+        assert!(!verify_tensor_packet(&key, "other", 12, &header, b"abc", &tag).unwrap());
+        assert!(!verify_tensor_packet(&key, "sender", 13, &header, b"abc", &tag).unwrap());
+        assert!(!verify_tensor_packet(&key, "sender", 12, &header, b"abd", &tag).unwrap());
+        let mut changed = header;
+        changed.sequence = 2;
+        assert!(!verify_tensor_packet(&key, "sender", 12, &changed, b"abc", &tag).unwrap());
     }
 
     #[test]
