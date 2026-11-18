@@ -110,13 +110,21 @@ Windows PowerShell:
     $env:AITP_CLUSTER_KEY = "paste-the-same-secret-on-each-machine"
     cargo run --release -- node --bind 0.0.0.0:9001 --data-port 9000
 
-Submit a descriptor from another machine:
+Submit a descriptor from another machine for metadata-only admission:
 
     cargo run --release -- offer --target 192.168.1.50:9001 --descriptor examples/tensor-descriptor.json
 
-The sender uses its persistent node ID and a persisted, increasing offer sequence under ~/.aitp (or %APPDATA%\aitp on Windows). Offers and replies use HMAC-SHA256. The worker rejects invalid signatures, stale sequences, duplicate pending message IDs, invalid descriptors, descriptors over 1 GiB, and offers exceeding its 32-entry pending metadata queue. Pending offers expire after 30 seconds.
+Transfer a matching tensor file in one authenticated operation:
 
-**This milestone admits metadata only.** It does not allocate a tensor buffer, create a file, receive tensor bytes, execute code, or load a model. The existing generic send/receive commands remain separate and are not yet connected to the authenticated offer path. The authenticated data-plane binding is the next milestone.
+    cargo run --release -- send-tensor --target 192.168.1.50:9001 --descriptor examples/tensor-descriptor.json --input layer-weights.bin
+
+The `send-tensor` command first obtains a signed admission response, then streams the file over the authenticated binary data plane. The descriptor's `byte_len` must exactly match the input file size. The worker's data port defaults to UDP 9000; override it with `--data-target 192.168.1.50:9000` when needed. The sender reuses the same UDP socket for the offer and payload transfer so the worker can bind the data packets to the peer endpoint recorded during admission.
+
+When `AITP_CLUSTER_KEY` is configured, the node binds its data receiver on `--data-port` and stores completed tensors in `AITP_TENSOR_DIR` (default: `aitp-tensors/`). Each binary datagram keeps the existing 32-byte header and appends a 32-byte HMAC-SHA256 tag after the payload. Authenticated payload chunks are sized so the complete datagram remains at or below 1200 bytes.
+
+The worker validates the HMAC, source endpoint, message ID, tensor ID, sequence, exact per-chunk length, CRC32, full chunk coverage, and declared final length. It writes to a bounded temporary file and renames it to a `.tensor` file only after all chunks verify. The current receiver admits one active transfer at a time, enforces a 1 GiB tensor ceiling, and keeps a bounded 256-entry duplicate-FIN response cache for 60 seconds.
+
+This transfers tensor bytes to disk; it does **not** load the tensor into an inference runtime or execute a model layer. The older generic `send`/`receive` commands remain unauthenticated compatibility paths and should only be used on a trusted network.
 
 ## Cluster dashboard v0.7
 
@@ -124,16 +132,16 @@ The manager serves a responsive, read-only web dashboard over HTTP. The dashboar
 
 ## Current limitations
 
-- ACK/retry is basic and uses batches of up to 512 chunks.
-- No congestion control, packet pacing, encryption, selective ACK ranges, adaptive MTU, or multi-transfer multiplexing. HMAC authentication currently protects tensor-offer control messages only.
+- The legacy generic send/receive path uses batches of up to 512 chunks. The authenticated tensor path uses a fixed 32-packet window with bounded pacing and retries; it is not congestion control.
+- No congestion control, adaptive rate control, selective ACK ranges, adaptive MTU, encryption, or multi-transfer multiplexing. The authenticated tensor path uses HMAC-SHA256 per datagram, but UDP retransmission and fixed pacing are still experimental and LAN-only.
 - UDP reliability is experimental; this implementation is not a replacement for a mature congestion-controlled transport.
-- Receiver handles one active transfer and writes to one output path.
-- Sender reads the input file into memory.
+- The authenticated tensor receiver handles one active transfer per worker. The legacy generic receiver writes to one configured output path.
+- The legacy generic sender reads its input file into memory. The authenticated `send-tensor` path reads bounded windows from disk.
 - Discovery, registration, and heartbeat messages remain unauthenticated. HMAC does not encrypt metadata or protect against a compromised endpoint. Offer replay counters are held in worker memory and reset when that worker restarts. Use only on a trusted LAN.
 - Manager inventory is in-memory and is lost when the manager restarts.
 - The manager does not authenticate node IDs; a device on the LAN can attempt to register a claimed ID.
 - Heartbeat liveness is based on sequence-numbered messages and a configurable timeout, not cryptographic identity.
-- The generic send/receive path is not yet bound to admitted descriptors; there is no authenticated tensor payload receiver or worker buffer allocation yet.
+- The authenticated tensor receiver stages completed payloads to disk; there is not yet a tensor allocator, mmap-backed runtime handoff, model loader, or inference execution path.
 - No inference-runtime integration, GPU-direct networking, RDMA, or zero-copy path.
 - Hardware inventory includes CPU model, OS, architecture, logical CPU count, total RAM, periodically refreshed available RAM, and best-effort accelerator names/vendors/memory. NVIDIA VRAM is reported when nvidia-smi is installed. Apple Silicon is represented as an integrated GPU sharing unified system memory. Some platform probes identify devices without reliable VRAM data. Compute capability, utilization, and measured throughput are not yet reported.
 
@@ -144,8 +152,8 @@ The manager serves a responsive, read-only web dashboard over HTTP. The dashboar
 3. Report CPU model and best-effort GPU/accelerator inventory. (Initial probes added in v0.4.)
 4. Define and validate tensor descriptors and control-plane offers. (Schema added in v0.5.)
 5. Authenticate and bound worker tensor-offer admission. (Initial metadata-only path added in v0.6.)
-6. Bind accepted offers to an authenticated, bounded tensor receive path without changing the 32-byte data-plane header.
-7. Integrate one inference backend (llama.cpp on CPU first) and execute a remote layer on a worker.
+6. Bind accepted offers to an authenticated, bounded tensor receive path without changing the 32-byte data-plane header. (Initial disk-staging transfer path and loopback integration test added in v0.8.)
+7. Add a runtime handoff and integrate one inference backend (llama.cpp on CPU first), then execute a remote layer on a worker.
 8. Implement pipeline partitioning: place contiguous transformer layer ranges on workers, transfer activations, and stream generated tokens.
 9. Add automatic memory-aware placement, then GPU/Metal/CUDA acceleration and performance tuning.
 10. Add control-plane authentication, congestion control, and benchmarking.
@@ -153,7 +161,7 @@ The manager serves a responsive, read-only web dashboard over HTTP. The dashboar
 
 ## Security
 
-Most control-plane messages and the generic transfer receiver remain unauthenticated. Tensor offers alone use HMAC-SHA256 with a shared environment-provided key; this provides integrity/authentication but not confidentiality. Use a trusted LAN. The next data-plane milestone must authenticate every payload packet and enforce allocation/disk limits before accepting bytes.
+Discovery, registration, heartbeats, the manager, dashboard, and legacy generic send/receive remain unauthenticated. The tensor offer and authenticated tensor payload path use HMAC-SHA256 with a shared environment-provided key; this provides integrity/authentication but not confidentiality. The receiver enforces a 1 GiB per-tensor ceiling and writes to bounded temporary files. Use a trusted LAN; do not expose these services to the public internet.
 
 ## License
 
