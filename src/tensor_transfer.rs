@@ -37,6 +37,8 @@ const RETRY_LIMIT: usize = 20;
 const FIN_ACK_WAIT: Duration = Duration::from_secs(1);
 const TRANSFER_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const COMPLETED_RETRY_TTL: Duration = Duration::from_secs(60);
+/// Bound duplicate-FIN response state even under a high transfer completion rate.
+const MAX_COMPLETED_TRANSFERS: usize = 256;
 const MAX_WORKER_TENSOR_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -71,6 +73,17 @@ pub async fn run_receiver(
     let output_dir = std::env::var_os("AITP_TENSOR_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("aitp-tensors"));
+    run_receiver_in(socket, key, admission, output_dir).await
+}
+
+/// Receiver implementation with an explicit output directory for isolated tests
+/// and embedders. Production callers use the AITP_TENSOR_DIR environment setting.
+async fn run_receiver_in(
+    socket: UdpSocket,
+    key: Vec<u8>,
+    admission: Arc<Mutex<OfferAdmission>>,
+    output_dir: PathBuf,
+) -> Result<()> {
     fs::create_dir_all(&output_dir)
         .await
         .with_context(|| format!("creating tensor output directory {}", output_dir.display()))?;
@@ -245,7 +258,7 @@ pub async fn run_receiver(
                         done.total_chunks,
                         finished.final_path.display()
                     );
-                    completed.push(done);
+                    remember_completed(&mut completed, done);
                 }
             }
         }
@@ -506,6 +519,13 @@ fn tensor_paths(
     )
 }
 
+fn remember_completed(completed: &mut Vec<CompletedTransfer>, transfer: CompletedTransfer) {
+    if completed.len() >= MAX_COMPLETED_TRANSFERS {
+        completed.remove(0);
+    }
+    completed.push(transfer);
+}
+
 fn verify_fin(
     done: &CompletedTransfer,
     key: &[u8],
@@ -527,6 +547,109 @@ fn verify_fin(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn authenticated_loopback_transfer_commits_exact_bytes() {
+        use crate::{
+            auth::sign_tensor_offer,
+            control::{TensorOfferMessage, CONTROL_VERSION},
+            tensor::{TensorDescriptor, TensorDType, TensorEncoding, TensorLayout},
+        };
+
+        let root = std::env::temp_dir().join(format!("aitp-e2e-{}", uuid::Uuid::new_v4()));
+        let output_dir = root.join("out");
+        fs::create_dir_all(&root).await.unwrap();
+
+        let data: Vec<u8> = (0..(MAX_AUTH_PAYLOAD * 3 + 17))
+            .map(|index| (index % 251) as u8)
+            .collect();
+        let input = root.join("input.bin");
+        fs::write(&input, &data).await.unwrap();
+
+        let receiver_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let receiver_addr = receiver_socket.local_addr().unwrap();
+        let sender_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let sender_addr = sender_socket.local_addr().unwrap();
+        let key = vec![0x5c; 32];
+
+        let mut offer = TensorOfferMessage {
+            version: CONTROL_VERSION,
+            sender_node_id: "loopback-sender".into(),
+            sequence: 1,
+            message_id: 0x4154_5001,
+            descriptor: TensorDescriptor {
+                tensor_id: 17,
+                name: "integration.test.tensor".into(),
+                dtype: TensorDType::U8,
+                shape: vec![data.len() as u64],
+                layout: TensorLayout::RowMajor,
+                encoding: TensorEncoding::Raw,
+                byte_len: data.len() as u64,
+            },
+            auth_tag: Vec::new(),
+        };
+        sign_tensor_offer(&mut offer, &key).unwrap();
+
+        let mut admission_state = OfferAdmission::default();
+        admission_state
+            .admit(&offer, sender_addr, &key, Instant::now())
+            .unwrap();
+        let admission = Arc::new(Mutex::new(admission_state));
+
+        let receiver = tokio::spawn(run_receiver_in(
+            receiver_socket,
+            key.clone(),
+            admission.clone(),
+            output_dir.clone(),
+        ));
+
+        let transfer_result =
+            send_tensor_data(&sender_socket, receiver_addr, &input, &offer, &key).await;
+        if let Err(error) = transfer_result {
+            receiver.abort();
+            let _ = fs::remove_dir_all(&root).await;
+            panic!("loopback tensor transfer failed: {error:#}");
+        }
+        receiver.abort();
+
+        let mut entries = fs::read_dir(&output_dir).await.unwrap();
+        let mut committed_path = None;
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            if entry.path().extension().and_then(|value| value.to_str()) == Some("tensor") {
+                committed_path = Some(entry.path());
+            }
+        }
+        let committed_path = committed_path.expect("receiver should commit a .tensor file");
+        let received = fs::read(committed_path).await.unwrap();
+        assert_eq!(received, data);
+        assert_eq!(fs::metadata(output_dir.join("missing")).await.is_err(), true);
+
+        fs::remove_dir_all(&root).await.unwrap();
+    }
+
+    #[test]
+    fn completed_retry_cache_is_bounded() {
+        let mut completed = Vec::new();
+        let now = Instant::now();
+        for message_id in 0..=(MAX_COMPLETED_TRANSFERS as u32) {
+            remember_completed(
+                &mut completed,
+                CompletedTransfer {
+                    sender_node_id: "sender".into(),
+                    offer_sequence: u64::from(message_id),
+                    message_id,
+                    tensor_id: 1,
+                    peer: "127.0.0.1:40000".parse().unwrap(),
+                    total_chunks: 1,
+                    byte_len: 1,
+                    expires_at: now + COMPLETED_RETRY_TTL,
+                },
+            );
+        }
+        assert_eq!(completed.len(), MAX_COMPLETED_TRANSFERS);
+        assert_eq!(completed.first().unwrap().message_id, 1);
+        assert_eq!(completed.last().unwrap().message_id, MAX_COMPLETED_TRANSFERS as u32);
+    }
 
     #[test]
     fn auth_datagram_encodes_unchanged_header_and_fits_mtu() {
