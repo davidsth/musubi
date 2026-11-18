@@ -4,6 +4,7 @@ mod dashboard;
 mod hardware;
 mod protocol;
 mod tensor;
+mod tensor_transfer;
 mod worker;
 
 use anyhow::{bail, Context, Result};
@@ -17,10 +18,11 @@ use std::{
     io::Write,
     net::SocketAddr,
     path::PathBuf,
+    sync::Arc,
     time::{Duration, Instant},
 };
 use sysinfo::System;
-use tokio::{fs, net::UdpSocket, time::timeout};
+use tokio::{fs, net::UdpSocket, sync::Mutex, time::timeout};
 
 const CHUNK_SIZE: usize = MAX_PAYLOAD;
 const WINDOW_PACKETS: usize = 512;
@@ -42,6 +44,15 @@ enum Command {
            #[arg(long, default_value_t = 1)] tensor_id: u32 },
     /// Submit authenticated tensor metadata to a worker. No tensor bytes are sent.
     Offer { #[arg(long)] target: SocketAddr, #[arg(long)] descriptor: PathBuf },
+    /// Offer a tensor and transfer its bytes to an authenticated AITP node.
+    SendTensor {
+        /// Worker control-plane address (normally UDP port 9001).
+        #[arg(long)] target: SocketAddr,
+        /// Worker tensor data-plane address (defaults to the same IP on UDP port 9000).
+        #[arg(long)] data_target: Option<SocketAddr>,
+        #[arg(long)] descriptor: PathBuf,
+        #[arg(long)] input: PathBuf,
+    },
     /// Run a LAN node agent with a persistent identity.
     Node { #[arg(long, default_value = "0.0.0.0:9001")] bind: SocketAddr,
            #[arg(long, default_value_t = 9000)] data_port: u16,
@@ -66,6 +77,7 @@ async fn main() -> Result<()> {
         Command::Receive { bind, output } => receive(bind, output).await,
         Command::Send { target, input, tensor_id } => send(target, input, tensor_id).await,
         Command::Offer { target, descriptor } => offer_tensor(target, descriptor).await,
+        Command::SendTensor { target, data_target, descriptor, input } => send_tensor(target, data_target, descriptor, input).await,
         Command::Node { bind, data_port, name, manager, heartbeat_ms } =>
             run_node(bind, data_port, name, manager, heartbeat_ms).await,
         Command::Discover { target, wait_ms } =>
@@ -142,7 +154,10 @@ async fn send(target: SocketAddr, input: PathBuf, tensor_id: u32) -> Result<()> 
 }
 
 
-async fn offer_tensor(target: SocketAddr, descriptor_path: PathBuf) -> Result<()> {
+async fn prepare_tensor_offer(
+    target: SocketAddr,
+    descriptor_path: PathBuf,
+) -> Result<(UdpSocket, TensorOfferMessage, Vec<u8>)> {
     let key = auth::cluster_key_from_env()?
         .context("set AITP_CLUSTER_KEY to the same 32+ byte secret used by the worker")?;
     let descriptor_bytes = fs::read(&descriptor_path)
@@ -158,7 +173,7 @@ async fn offer_tensor(target: SocketAddr, descriptor_path: PathBuf) -> Result<()
     let message_id = u32::from_be_bytes(random_id.as_bytes()[0..4].try_into()?) | 1;
     let mut offer = TensorOfferMessage {
         version: CONTROL_VERSION,
-        sender_node_id: sender_node_id.clone(),
+        sender_node_id,
         sequence,
         message_id,
         descriptor,
@@ -173,23 +188,33 @@ async fn offer_tensor(target: SocketAddr, descriptor_path: PathBuf) -> Result<()
 
     let bind = if target.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
     let socket = UdpSocket::bind(bind).await?;
-    socket.connect(target).await?;
-    socket.send(&encoded).await?;
+    socket.send_to(&encoded, target).await?;
+    Ok((socket, offer, key))
+}
 
+async fn await_tensor_admission(
+    socket: &UdpSocket,
+    target: SocketAddr,
+    offer: &TensorOfferMessage,
+    key: &[u8],
+) -> Result<TensorOfferReply> {
     let mut buf = [0u8; MAX_CONTROL_DATAGRAM];
-    let n = timeout(Duration::from_secs(3), socket.recv(&mut buf))
+    let (n, peer) = timeout(Duration::from_secs(3), socket.recv_from(&mut buf))
         .await
         .context("timed out waiting for tensor-offer admission reply")??;
+    if peer != target {
+        bail!("tensor-offer reply came from unexpected peer {peer}");
+    }
     let response: ControlMessage = serde_json::from_slice(&buf[..n])?;
     let ControlMessage::TensorOfferReply { reply } = response else {
         bail!("worker returned an unexpected control message");
     };
-    if !auth::verify_tensor_offer_reply(&reply, &key)? {
+    if !auth::verify_tensor_offer_reply(&reply, key)? {
         bail!("worker reply authentication failed; verify that both nodes share the same AITP_CLUSTER_KEY");
     }
-    if reply.sender_node_id != sender_node_id
-        || reply.sequence != sequence
-        || reply.message_id != message_id
+    if reply.sender_node_id != offer.sender_node_id
+        || reply.sequence != offer.sequence
+        || reply.message_id != offer.message_id
         || reply.tensor_id != offer.descriptor.tensor_id
     {
         bail!("worker reply does not match this tensor offer");
@@ -200,15 +225,39 @@ async fn offer_tensor(target: SocketAddr, descriptor_path: PathBuf) -> Result<()
             reply.reason.as_deref().unwrap_or("no reason supplied")
         );
     }
+    Ok(reply)
+}
 
+async fn offer_tensor(target: SocketAddr, descriptor_path: PathBuf) -> Result<()> {
+    let (socket, offer, key) = prepare_tensor_offer(target, descriptor_path).await?;
+    let reply = await_tensor_admission(&socket, target, &offer, &key).await?;
     println!(
         "Worker {} admitted metadata for tensor '{}' ({} bytes).",
         reply.receiver_node_id,
         offer.descriptor.name,
         offer.descriptor.byte_len
     );
-    println!("No tensor bytes were sent; authenticated data-plane transfer is the next milestone.");
+    println!("No tensor bytes were sent; use send-tensor to complete the authenticated transfer.");
     Ok(())
+}
+
+async fn send_tensor(
+    target: SocketAddr,
+    data_target: Option<SocketAddr>,
+    descriptor_path: PathBuf,
+    input: PathBuf,
+) -> Result<()> {
+    let (socket, offer, key) = prepare_tensor_offer(target, descriptor_path).await?;
+    let reply = await_tensor_admission(&socket, target, &offer, &key).await?;
+    let data_target = data_target.unwrap_or_else(|| SocketAddr::new(target.ip(), 9000));
+    if data_target.ip() != target.ip() {
+        bail!("control and data targets must use the same worker IP so the admitted UDP peer stays bound to this transfer");
+    }
+    println!(
+        "Worker {} admitted tensor '{}'; starting payload transfer.",
+        reply.receiver_node_id, offer.descriptor.name
+    );
+    tensor_transfer::send_tensor_data(&socket, data_target, &input, &offer, &key).await
 }
 
 async fn receive(bind: SocketAddr, output: PathBuf) -> Result<()> {
