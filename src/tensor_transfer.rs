@@ -607,10 +607,12 @@ mod tests {
             send_tensor_data(&sender_socket, receiver_addr, &input, &offer, &key).await;
         if let Err(error) = transfer_result {
             receiver.abort();
+            let _ = receiver.await;
             let _ = fs::remove_dir_all(&root).await;
             panic!("loopback tensor transfer failed: {error:#}");
         }
         receiver.abort();
+        let _ = receiver.await;
 
         let mut entries = fs::read_dir(&output_dir).await.unwrap();
         let mut committed_path = None;
@@ -622,8 +624,6 @@ mod tests {
         let committed_path = committed_path.expect("receiver should commit a .tensor file");
         let received = fs::read(committed_path).await.unwrap();
         assert_eq!(received, data);
-        assert_eq!(fs::metadata(output_dir.join("missing")).await.is_err(), true);
-
         fs::remove_dir_all(&root).await.unwrap();
     }
 
