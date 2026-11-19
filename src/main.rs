@@ -3,6 +3,7 @@ mod control;
 mod dashboard;
 mod hardware;
 mod protocol;
+mod runtime;
 mod storage;
 mod tensor;
 mod tensor_transfer;
@@ -70,6 +71,13 @@ enum Command {
         /// Recompute SHA-256 for each displayed payload (slower for large tensors).
         #[arg(long, default_value_t = false)] verify_hashes: bool,
     },
+    /// Prepare one committed tensor for a runtime adapter after same-handle SHA-256 verification.
+    PrepareTensor {
+        /// Path to the tensor's JSON sidecar manifest.
+        #[arg(long)] manifest: PathBuf,
+        /// Directory containing the payload (defaults to the manifest's parent directory).
+        #[arg(long)] directory: Option<PathBuf>,
+    },
     /// Run a cluster manager that tracks registrations and node liveness.
     Manager { #[arg(long, default_value = "0.0.0.0:9002")] bind: SocketAddr,
               #[arg(long, default_value_t = 5000)] timeout_ms: u64,
@@ -90,6 +98,7 @@ async fn main() -> Result<()> {
         Command::Discover { target, wait_ms } =>
             discover(target, Duration::from_millis(wait_ms)).await,
         Command::Catalog { directory, verify_hashes } => catalog_tensors(directory, verify_hashes).await,
+        Command::PrepareTensor { manifest, directory } => prepare_tensor(manifest, directory).await,
         Command::Manager { bind, timeout_ms, dashboard_bind } =>
             run_manager(bind, Duration::from_millis(timeout_ms.max(500)), dashboard_bind).await,
     }
@@ -146,6 +155,41 @@ async fn catalog_tensors(directory: Option<PathBuf>, verify_hashes: bool) -> Res
     if verify_hashes {
         println!("Verified SHA-256 for {} displayed tensor(s).", snapshot.recent.len());
     }
+    Ok(())
+}
+
+async fn prepare_tensor(manifest_path: PathBuf, directory: Option<PathBuf>) -> Result<()> {
+    let metadata = fs::symlink_metadata(&manifest_path)
+        .await
+        .with_context(|| format!("inspecting manifest {}", manifest_path.display()))?;
+    if !metadata.file_type().is_file()
+        || metadata.len() == 0
+        || metadata.len() > storage::MAX_MANIFEST_BYTES
+    {
+        bail!("manifest must be a non-empty regular file no larger than {} bytes", storage::MAX_MANIFEST_BYTES);
+    }
+
+    let encoded = fs::read(&manifest_path)
+        .await
+        .with_context(|| format!("reading manifest {}", manifest_path.display()))?;
+    let manifest: storage::TensorManifest =
+        serde_json::from_slice(&encoded).context("parsing tensor manifest JSON")?;
+
+    let directory = directory.unwrap_or_else(|| {
+        manifest_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."))
+    });
+    let prepared = runtime::open_verified_tensor(&directory, &manifest).await?;
+    println!("Verified tensor '{}' (ID {})", prepared.descriptor().name, prepared.descriptor().tensor_id);
+    println!("Shape: {:?} | dtype: {:?} | encoding: {:?}", prepared.descriptor().shape,
+        prepared.descriptor().dtype, prepared.descriptor().encoding);
+    println!("Payload: {} ({} bytes)", prepared.manifest().payload_file, prepared.byte_len());
+    println!("SHA-256: {}", prepared.manifest().sha256);
+    println!("A read-only streaming handle is open at byte 0. No bytes were copied into a second buffer or passed to a model runtime.");
+    drop(prepared);
     Ok(())
 }
 
