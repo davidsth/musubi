@@ -151,35 +151,32 @@ pub async fn commit_tensor_file(
         bail!("tensor manifest exceeds the local size limit");
     }
 
-    let write_result = async {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary_manifest)
-            .await
-            .with_context(|| format!("creating manifest staging file {}", temporary_manifest.display()))?;
-        file.write_all(&encoded).await?;
-        file.sync_all().await?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary_manifest)
+        .await
+        .with_context(|| format!("creating manifest staging file {}", temporary_manifest.display()))?;
+    if let Err(error) = file.write_all(&encoded).await {
         drop(file);
-
-        fs::rename(partial_path, final_path)
-            .await
-            .with_context(|| format!("committing tensor payload {}", final_path.display()))?;
-        fs::rename(&temporary_manifest, &manifest_path)
-            .await
-            .with_context(|| format!("publishing tensor manifest {}", manifest_path.display()))?;
-        Ok::<(), anyhow::Error>(())
-    }
-    .await;
-
-    if let Err(error) = write_result {
         let _ = fs::remove_file(&temporary_manifest).await;
-        // If payload publication succeeded but sidecar publication failed,
-        // roll back the unindexed payload where possible.
-        if fs::try_exists(&manifest_path).await.unwrap_or(false) == false {
-            let _ = fs::remove_file(final_path).await;
-        }
-        return Err(error);
+        return Err(error).context("writing tensor manifest staging file");
+    }
+    if let Err(error) = file.sync_all().await {
+        drop(file);
+        let _ = fs::remove_file(&temporary_manifest).await;
+        return Err(error).context("syncing tensor manifest staging file");
+    }
+    drop(file);
+
+    if let Err(error) = fs::rename(partial_path, final_path).await {
+        let _ = fs::remove_file(&temporary_manifest).await;
+        return Err(error).with_context(|| format!("committing tensor payload {}", final_path.display()));
+    }
+    if let Err(error) = fs::rename(&temporary_manifest, &manifest_path).await {
+        let _ = fs::remove_file(&temporary_manifest).await;
+        let _ = fs::remove_file(final_path).await;
+        return Err(error).with_context(|| format!("publishing tensor manifest {}", manifest_path.display()));
     }
 
     Ok(manifest)
@@ -249,6 +246,20 @@ pub async fn scan_store(directory: &Path) -> Result<TensorStoreSnapshot> {
     Ok(snapshot)
 }
 
+/// Recompute the payload digest before handing an artifact to a runtime.
+pub async fn verify_payload(directory: &Path, manifest: &TensorManifest) -> Result<bool> {
+    manifest.validate()?;
+    let payload_path = directory.join(&manifest.payload_file);
+    let metadata = match fs::symlink_metadata(&payload_path).await {
+        Ok(metadata) if metadata.file_type().is_file() => metadata,
+        _ => return Ok(false),
+    };
+    if metadata.len() != manifest.byte_len {
+        return Ok(false);
+    }
+    Ok(sha256_file(&payload_path).await? == manifest.sha256)
+}
+
 pub async fn sha256_file(path: &Path) -> Result<String> {
     let mut file = fs::File::open(path)
         .await
@@ -315,6 +326,20 @@ mod tests {
         for path in ["../outside.tensor", "subdir/file.tensor", r"..\\outside.tensor", "C:outside.tensor"] {
             assert!(sample_manifest(path, 32).validate().is_err(), "accepted {path}");
         }
+    }
+
+    #[tokio::test]
+    async fn detects_payload_changes_after_manifest_creation() {
+        let root = std::env::temp_dir().join(format!("aitp-verify-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).await.unwrap();
+        let payload = root.join("weights.tensor");
+        fs::write(&payload, b"good").await.unwrap();
+        let mut manifest = sample_manifest("weights.tensor", 4);
+        manifest.sha256 = sha256_file(&payload).await.unwrap();
+        assert!(verify_payload(&root, &manifest).await.unwrap());
+        fs::write(&payload, b"evil").await.unwrap();
+        assert!(!verify_payload(&root, &manifest).await.unwrap());
+        fs::remove_dir_all(&root).await.unwrap();
     }
 
     #[test]
