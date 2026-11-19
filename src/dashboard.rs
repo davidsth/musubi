@@ -1,7 +1,7 @@
 //! Read-only HTTP dashboard for the cluster manager. No control actions are exposed.
 use axum::{extract::State, response::Html, routing::get, Json, Router};
 use serde::Serialize;
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::Arc};
 use tokio::{net::TcpListener, sync::RwLock};
 
 pub const DASHBOARD_HTML: &str = include_str!("../web/dashboard.html");
@@ -74,5 +74,7 @@ mod tests {
     fn dashboard_contains_read_only_routes_only() {
         assert!(DASHBOARD_HTML.contains("/api/cluster"));
         assert!(!DASHBOARD_HTML.contains("eval("));
+        assert!(DASHBOARD_HTML.contains("Stored tensor artifacts"));
+        assert!(DASHBOARD_HTML.contains("s.tensor_store"));
     }
 }
