@@ -64,7 +64,7 @@ enum Command {
     /// Discover AITP nodes using IPv4 UDP broadcast.
     Discover { #[arg(long, default_value = "255.255.255.255:9001")] target: SocketAddr,
                #[arg(long, default_value_t = 1500)] wait_ms: u64 },
-    /// List verified tensor artifacts in the local AITP tensor store.
+    /// List catalogued tensor artifacts in the local AITP tensor store.
     Catalog {
         #[arg(long)] directory: Option<PathBuf>,
         /// Recompute SHA-256 for each displayed payload (slower for large tensors).
