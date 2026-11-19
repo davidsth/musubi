@@ -191,6 +191,7 @@ mod tests {
         let mut actual = Vec::new();
         reader.read_to_end(&mut actual).await.unwrap();
         assert_eq!(actual, expected);
+        drop(reader);
         fs::remove_dir_all(root).await.unwrap();
     }
 
