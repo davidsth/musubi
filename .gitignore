@@ -3,4 +3,4 @@ target/
 *.bin
 .DS_Store
 aitp-tensors/
-*.json.part
+*.json.*.part
