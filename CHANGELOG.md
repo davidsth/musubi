@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.9.0 — Durable tensor manifests and local catalog
+
+- Added versioned JSON sidecars for completed authenticated tensor payloads, including the typed descriptor, sender identity, offer sequence, transfer ID, exact byte length, commit timestamp, payload basename, and SHA-256 digest.
+- Publish payload and manifest through same-directory staging/rename steps; the catalog ignores manifests whose payload is absent, not a regular file, or has the wrong length.
+- Added a bounded local tensor-store scanner and an explicit SHA-256 verification helper.
+- Added the `catalog` CLI command with optional `--verify-hashes` and custom `--directory`.
+- Expanded the existing read-only dashboard with recent local tensor artifacts, tensor count, total bytes, descriptor metadata, and digest.
+- Clarified that the dashboard catalog scans only the dashboard host's local AITP_TENSOR_DIR; remote node stores are not aggregated.
+- Added manifest validation, path-safety, catalog filtering, post-commit mutation detection, and end-to-end manifest assertions.
+- No runtime loader, model execution, arbitrary remote commands, or change to the 32-byte data-plane header.
+
 ## v0.8.0 — Authenticated tensor payload transfer
 
 - Connected authenticated tensor offers to a worker-side UDP data receiver.
