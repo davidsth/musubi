@@ -647,7 +647,7 @@ mod tests {
         manifest.validate().unwrap();
         assert_eq!(manifest.descriptor.name, "integration.test.tensor");
         assert_eq!(manifest.byte_len, data.len() as u64);
-        assert_eq!(manifest.payload_file, committed_path.file_name().unwrap().to_string_lossy());
+        assert_eq!(manifest.payload_file, committed_path.file_name().unwrap().to_string_lossy().to_string());
         assert_eq!(storage::sha256_file(&committed_path).await.unwrap(), manifest.sha256);
         fs::remove_dir_all(&root).await.unwrap();
     }
