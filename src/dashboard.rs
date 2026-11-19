@@ -12,6 +12,8 @@ pub struct ClusterSnapshot {
     pub nodes: Vec<DashboardNode>,
     pub online_nodes: usize,
     pub offline_nodes: usize,
+    /// Manifests and payloads visible in the dashboard host's local tensor directory.
+    pub tensor_store: crate::storage::TensorStoreSnapshot,
     pub updated_at_unix: u64,
 }
 
@@ -64,6 +66,8 @@ mod tests {
         let value = serde_json::to_value(snapshot.read().await.clone()).unwrap();
         assert_eq!(value["nodes"].as_array().unwrap().len(), 0);
         assert_eq!(value["online_nodes"], 0);
+        assert_eq!(value["tensor_store"]["count"], 0);
+        assert_eq!(value["tensor_store"]["recent"].as_array().unwrap().len(), 0);
     }
 
     #[test]
