@@ -144,6 +144,16 @@ Recompute SHA-256 for the displayed artifacts:
 
 Use `--directory /path/to/aitp-tensors` to inspect a different store. The catalog displays at most the 32 most recent valid manifests; verification checks those displayed entries. The default store directory is `AITP_TENSOR_DIR`, or `aitp-tensors/` when the variable is unset.
 
+## Verified runtime handoff v0.10
+
+AITP now exposes a local runtime-handoff API for committed tensor artifacts. `runtime::open_verified_tensor(directory, manifest)` validates the typed manifest, opens the payload read-only without following a final-component symbolic link/reparse point on supported desktop platforms, checks the exact byte length, computes SHA-256 through that same open file handle, and rewinds it to byte zero. The returned `VerifiedTensor` exposes the descriptor and manifest plus the already-open streaming reader. A runtime adapter should consume that reader rather than reopening a payload path from untrusted metadata; tensor bytes are not copied into a second full-size buffer.
+
+Validate one artifact from the command line:
+
+    cargo run --release -- prepare-tensor --manifest aitp-tensors/<artifact>.json
+
+Use `--directory /path/to/aitp-tensors` when the sidecar and payload are stored separately. The command reads only a bounded JSON sidecar, verifies the corresponding payload, and prints its descriptor and digest. It does not load the tensor into a model, allocate a tensor-sized buffer, or execute any remote workload. The API is the handoff point for a future llama.cpp adapter; model/runtime compatibility and layer execution are not implemented yet.
+
 ## Cluster dashboard v0.7
 
 The manager serves a responsive, read-only web dashboard over HTTP. The dashboard is intentionally separate from the UDP tensor data plane and reads a snapshot of the manager's in-memory node inventory. It does not issue commands to nodes, allocate workloads, or execute code. The default bind is localhost; LAN exposure requires an explicit bind-address override. The dashboard currently has no authentication or TLS, so keep it on localhost or a trusted isolated LAN.
@@ -174,11 +184,12 @@ The v0.9 dashboard also shows valid tensor manifests found in the dashboard host
 5. Authenticate and bound worker tensor-offer admission. (Initial metadata-only path added in v0.6.)
 6. Bind accepted offers to an authenticated, bounded tensor receive path without changing the 32-byte data-plane header. (Initial disk-staging transfer path and loopback integration test added in v0.8.)
 7. Publish durable tensor manifests and provide a local artifact catalog with explicit SHA-256 verification. (Added in v0.9.)
-8. Add a runtime handoff and integrate one inference backend (llama.cpp on CPU first), then execute a remote layer on a worker.
-9. Implement pipeline partitioning: place contiguous transformer layer ranges on workers, transfer activations, and stream generated tokens.
-10. Add automatic memory-aware placement, then GPU/Metal/CUDA acceleration and performance tuning.
-11. Add control-plane authentication, congestion control, and benchmarking.
-12. Add a cluster dashboard for live node inventory. (Initial read-only dashboard added in v0.7; local tensor catalog added in v0.9.)
+8. Add a verified streaming runtime handoff from a manifest to an open payload reader. (Added in v0.10.)
+9. Integrate one inference backend (llama.cpp on CPU first), then execute a remote layer on a worker.
+10. Implement pipeline partitioning: place contiguous transformer layer ranges on workers, transfer activations, and stream generated tokens.
+11. Add automatic memory-aware placement, then GPU/Metal/CUDA acceleration and performance tuning.
+12. Add control-plane authentication, congestion control, and benchmarking.
+13. Add a cluster dashboard for live node inventory. (Initial read-only dashboard added in v0.7; local tensor catalog added in v0.9.)
 
 ## Security
 
