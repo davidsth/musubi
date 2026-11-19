@@ -3,6 +3,7 @@ mod control;
 mod dashboard;
 mod hardware;
 mod protocol;
+mod storage;
 mod tensor;
 mod tensor_transfer;
 mod worker;
@@ -63,6 +64,8 @@ enum Command {
     /// Discover AITP nodes using IPv4 UDP broadcast.
     Discover { #[arg(long, default_value = "255.255.255.255:9001")] target: SocketAddr,
                #[arg(long, default_value_t = 1500)] wait_ms: u64 },
+    /// List verified tensor artifacts in the local AITP tensor store.
+    Catalog { #[arg(long)] directory: Option<PathBuf> },
     /// Run a cluster manager that tracks registrations and node liveness.
     Manager { #[arg(long, default_value = "0.0.0.0:9002")] bind: SocketAddr,
               #[arg(long, default_value_t = 5000)] timeout_ms: u64,
@@ -82,6 +85,7 @@ async fn main() -> Result<()> {
             run_node(bind, data_port, name, manager, heartbeat_ms).await,
         Command::Discover { target, wait_ms } =>
             discover(target, Duration::from_millis(wait_ms)).await,
+        Command::Catalog { directory } => catalog_tensors(directory).await,
         Command::Manager { bind, timeout_ms, dashboard_bind } =>
             run_manager(bind, Duration::from_millis(timeout_ms.max(500)), dashboard_bind).await,
     }
@@ -90,6 +94,37 @@ async fn main() -> Result<()> {
 fn make_header(kind: u8, message_id: u32, tensor_id: u32, sequence: u32, payload: &[u8]) -> Header {
     Header { kind, flags: 0, message_id, tensor_id, sequence,
         payload_len: payload.len() as u16, checksum: checksum(payload), worker_id: 0 }
+}
+
+async fn catalog_tensors(directory: Option<PathBuf>) -> Result<()> {
+    let directory = directory.unwrap_or_else(storage::configured_store_dir);
+    let snapshot = storage::scan_store(&directory).await?;
+    println!(
+        "AITP tensor store: {} valid tensor(s), {:.2} GiB in {}",
+        snapshot.count,
+        snapshot.total_bytes as f64 / 1024.0_f64.powi(3),
+        directory.display()
+    );
+    for manifest in &snapshot.recent {
+        println!(
+            "- {} | {:?} | {:?} | shape {:?} | {} bytes | {} | sha256 {}…",
+            manifest.descriptor.name,
+            manifest.descriptor.dtype,
+            manifest.descriptor.encoding,
+            manifest.descriptor.shape,
+            manifest.byte_len,
+            manifest.payload_file,
+            &manifest.sha256[..16]
+        );
+    }
+    if snapshot.count > snapshot.recent.len() {
+        println!(
+            "Showing the {} most recent manifests of {} valid tensor(s).",
+            snapshot.recent.len(),
+            snapshot.count
+        );
+    }
+    Ok(())
 }
 
 async fn send(target: SocketAddr, input: PathBuf, tensor_id: u32) -> Result<()> {
@@ -499,7 +534,7 @@ async fn run_node(
                         }
                         if accepted {
                             println!(
-                                "Admitted tensor metadata '{}' from {} ({} bytes); no payload allocated.",
+                                "Admitted tensor metadata '{}' from {} ({} bytes); awaiting authenticated payload transfer.",
                                 offer.descriptor.name, peer, offer.descriptor.byte_len
                             );
                         }
@@ -533,6 +568,7 @@ async fn run_manager(bind: SocketAddr, offline_after: Duration, dashboard_bind: 
     println!("Dashboard is read-only and defaults to localhost; use --dashboard-bind to expose it on a trusted LAN.");
 
     let mut nodes: HashMap<String, ManagedNode> = HashMap::new();
+    let tensor_store_dir = storage::configured_store_dir();
     let mut buf = [0u8; MAX_CONTROL_DATAGRAM];
     let mut refresh = tokio::time::interval(Duration::from_secs(1));
 
@@ -579,10 +615,18 @@ async fn run_manager(bind: SocketAddr, offline_after: Duration, dashboard_bind: 
                     });
                 }
                 snapshot_nodes.sort_by(|a, b| a.hostname.cmp(&b.hostname));
+                let tensor_store = match storage::scan_store(&tensor_store_dir).await {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        eprintln!("Could not scan local tensor store {}: {error:#}", tensor_store_dir.display());
+                        storage::TensorStoreSnapshot::default()
+                    }
+                };
                 *dashboard_snapshot.write().await = dashboard::ClusterSnapshot {
                     nodes: snapshot_nodes,
                     online_nodes,
                     offline_nodes: nodes.len().saturating_sub(online_nodes),
+                    tensor_store,
                     updated_at_unix: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
                 };
