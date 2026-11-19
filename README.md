@@ -114,6 +114,8 @@ Submit a descriptor from another machine for metadata-only admission:
 
     cargo run --release -- offer --target 192.168.1.50:9001 --descriptor examples/tensor-descriptor.json
 
+## Authenticated tensor payload transfer v0.8
+
 Transfer a matching tensor file in one authenticated operation:
 
     cargo run --release -- send-tensor --target 192.168.1.50:9001 --descriptor examples/tensor-descriptor.json --input layer-weights.bin
@@ -126,9 +128,27 @@ The worker validates the HMAC, source endpoint, message ID, tensor ID, sequence,
 
 This transfers tensor bytes to disk; it does **not** load the tensor into an inference runtime or execute a model layer. The older generic `send`/`receive` commands remain unauthenticated compatibility paths and should only be used on a trusted network.
 
+## Durable tensor manifests and local catalog v0.9
+
+Every completed authenticated transfer now publishes a JSON sidecar next to its payload. For example, `<generated-id>.tensor` is paired with `<generated-id>.json`. The manifest contains a schema version, sender node identity, offer sequence, transfer message ID, the complete typed tensor descriptor, exact byte length, commit timestamp, payload basename, and SHA-256 digest computed from the staged bytes before commit.
+
+The receiver stages the manifest, renames the verified payload into place, then publishes the sidecar. The dashboard catalog accepts only bounded, valid manifests whose referenced payload is a regular file with the declared length. It does not re-hash payloads on every refresh; use the explicit catalog verification option before runtime handoff.
+
+List the most recent local artifacts:
+
+    cargo run --release -- catalog
+
+Recompute SHA-256 for the displayed artifacts:
+
+    cargo run --release -- catalog --verify-hashes
+
+Use `--directory /path/to/aitp-tensors` to inspect a different store. The catalog displays at most the 32 most recent valid manifests; verification checks those displayed entries. The default store directory is `AITP_TENSOR_DIR`, or `aitp-tensors/` when the variable is unset.
+
 ## Cluster dashboard v0.7
 
 The manager serves a responsive, read-only web dashboard over HTTP. The dashboard is intentionally separate from the UDP tensor data plane and reads a snapshot of the manager's in-memory node inventory. It does not issue commands to nodes, allocate workloads, or execute code. The default bind is localhost; LAN exposure requires an explicit bind-address override. The dashboard currently has no authentication or TLS, so keep it on localhost or a trusted isolated LAN.
+
+The v0.9 dashboard also shows valid tensor manifests found in the dashboard host's local `AITP_TENSOR_DIR`. This is a local-store view, not a remote cluster-wide tensor inventory: worker directories on other machines are not scanned or fetched yet. The UI checks manifest structure and payload length but does not hash large tensors on each refresh.
 
 ## Current limitations
 
@@ -141,7 +161,7 @@ The manager serves a responsive, read-only web dashboard over HTTP. The dashboar
 - Manager inventory is in-memory and is lost when the manager restarts.
 - The manager does not authenticate node IDs; a device on the LAN can attempt to register a claimed ID.
 - Heartbeat liveness is based on sequence-numbered messages and a configurable timeout, not cryptographic identity.
-- The authenticated tensor receiver stages completed payloads to disk; there is not yet a tensor allocator, mmap-backed runtime handoff, model loader, or inference execution path.
+- The authenticated tensor receiver stages completed payloads to disk and publishes a SHA-256 manifest. There is not yet a tensor allocator, mmap-backed runtime handoff, model loader, or inference execution path. The dashboard's artifact catalog is local to the manager host and does not aggregate remote worker stores.
 - No inference-runtime integration, GPU-direct networking, RDMA, or zero-copy path.
 - Hardware inventory includes CPU model, OS, architecture, logical CPU count, total RAM, periodically refreshed available RAM, and best-effort accelerator names/vendors/memory. NVIDIA VRAM is reported when nvidia-smi is installed. Apple Silicon is represented as an integrated GPU sharing unified system memory. Some platform probes identify devices without reliable VRAM data. Compute capability, utilization, and measured throughput are not yet reported.
 
@@ -153,11 +173,12 @@ The manager serves a responsive, read-only web dashboard over HTTP. The dashboar
 4. Define and validate tensor descriptors and control-plane offers. (Schema added in v0.5.)
 5. Authenticate and bound worker tensor-offer admission. (Initial metadata-only path added in v0.6.)
 6. Bind accepted offers to an authenticated, bounded tensor receive path without changing the 32-byte data-plane header. (Initial disk-staging transfer path and loopback integration test added in v0.8.)
-7. Add a runtime handoff and integrate one inference backend (llama.cpp on CPU first), then execute a remote layer on a worker.
-8. Implement pipeline partitioning: place contiguous transformer layer ranges on workers, transfer activations, and stream generated tokens.
-9. Add automatic memory-aware placement, then GPU/Metal/CUDA acceleration and performance tuning.
-10. Add control-plane authentication, congestion control, and benchmarking.
-11. Add a cluster dashboard for live node inventory. (Initial read-only dashboard added in v0.7.)
+7. Publish durable tensor manifests and provide a local artifact catalog with explicit SHA-256 verification. (Added in v0.9.)
+8. Add a runtime handoff and integrate one inference backend (llama.cpp on CPU first), then execute a remote layer on a worker.
+9. Implement pipeline partitioning: place contiguous transformer layer ranges on workers, transfer activations, and stream generated tokens.
+10. Add automatic memory-aware placement, then GPU/Metal/CUDA acceleration and performance tuning.
+11. Add control-plane authentication, congestion control, and benchmarking.
+12. Add a cluster dashboard for live node inventory. (Initial read-only dashboard added in v0.7; local tensor catalog added in v0.9.)
 
 ## Security
 
