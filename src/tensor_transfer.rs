@@ -23,6 +23,7 @@ use tokio::{
 use crate::{
     auth,
     control::TensorOfferMessage,
+    storage,
     protocol::{
         self, Header, AUTH_TAG_LEN, KIND_ACK, KIND_DATA, KIND_FIN, KIND_FIN_ACK,
         MAX_AUTH_PAYLOAD, MAX_DATAGRAM, HEADER_LEN,
@@ -70,9 +71,7 @@ pub async fn run_receiver(
     key: Vec<u8>,
     admission: Arc<Mutex<OfferAdmission>>,
 ) -> Result<()> {
-    let output_dir = std::env::var_os("AITP_TENSOR_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("aitp-tensors"));
+    let output_dir = storage::configured_store_dir();
     run_receiver_in(socket, key, admission, output_dir).await
 }
 
@@ -231,9 +230,21 @@ async fn run_receiver_in(
                     finished.file.set_len(declared_bytes).await?;
                     finished.file.sync_all().await?;
                     drop(finished.file);
-                    fs::rename(&finished.partial_path, &finished.final_path)
-                        .await
-                        .with_context(|| format!("committing tensor file {}", finished.final_path.display()))?;
+                    let manifest = match storage::commit_tensor_file(
+                        &finished.partial_path,
+                        &finished.final_path,
+                        &finished.offer.offer,
+                    ).await {
+                        Ok(manifest) => manifest,
+                        Err(error) => {
+                            let _ = fs::remove_file(&finished.partial_path).await;
+                            admission.lock().await.remove_pending(
+                                &finished.offer.offer.sender_node_id,
+                                finished.offer.offer.message_id,
+                            );
+                            return Err(error).context("publishing committed tensor manifest");
+                        }
+                    };
 
                     let done = CompletedTransfer {
                         sender_node_id: finished.offer.offer.sender_node_id.clone(),
@@ -258,6 +269,8 @@ async fn run_receiver_in(
                         done.total_chunks,
                         finished.final_path.display()
                     );
+                    println!("Tensor manifest published at {}", storage::manifest_path_for_payload(&finished.final_path).display());
+                    debug_assert_eq!(manifest.byte_len, done.byte_len);
                     remember_completed(&mut completed, done);
                 }
             }
@@ -625,8 +638,17 @@ mod tests {
             }
         }
         let committed_path = committed_path.expect("receiver should commit a .tensor file");
-        let received = fs::read(committed_path).await.unwrap();
+        let received = fs::read(&committed_path).await.unwrap();
         assert_eq!(received, data);
+
+        let manifest_path = storage::manifest_path_for_payload(&committed_path);
+        let manifest_bytes = fs::read(&manifest_path).await.unwrap();
+        let manifest: storage::TensorManifest = serde_json::from_slice(&manifest_bytes).unwrap();
+        manifest.validate().unwrap();
+        assert_eq!(manifest.descriptor.name, "integration.test.tensor");
+        assert_eq!(manifest.byte_len, data.len() as u64);
+        assert_eq!(manifest.payload_file, committed_path.file_name().unwrap().to_string_lossy());
+        assert_eq!(storage::sha256_file(&committed_path).await.unwrap(), manifest.sha256);
         fs::remove_dir_all(&root).await.unwrap();
     }
 
