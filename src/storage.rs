@@ -106,7 +106,7 @@ pub async fn commit_tensor_file(
         bail!("generated tensor payload filename is invalid");
     }
 
-    let payload_metadata = fs::metadata(partial_path)
+    let payload_metadata = fs::symlink_metadata(partial_path)
         .await
         .with_context(|| format!("stat staging tensor {}", partial_path.display()))?;
     if !payload_metadata.is_file() || payload_metadata.len() != offer.descriptor.byte_len {
