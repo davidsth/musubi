@@ -6,7 +6,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    fmt::Write as FmtWrite,
+    fmt::Write as _,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -290,7 +290,7 @@ fn is_safe_payload_basename(value: &str) -> bool {
         && !value.contains('/')
         && !value.contains('\\')
         && !value.contains(':')
-        && !value.chars().any(char::is_control)
+        && !value.chars().any(|character| character.is_control())
 }
 
 #[cfg(test)]
