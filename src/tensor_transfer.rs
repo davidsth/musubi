@@ -649,6 +649,10 @@ mod tests {
         assert_eq!(manifest.byte_len, data.len() as u64);
         assert_eq!(manifest.payload_file, committed_path.file_name().unwrap().to_string_lossy().to_string());
         assert_eq!(storage::sha256_file(&committed_path).await.unwrap(), manifest.sha256);
+        assert!(storage::verify_payload(&output_dir, &manifest).await.unwrap());
+        let catalog = storage::scan_store(&output_dir).await.unwrap();
+        assert_eq!(catalog.count, 1);
+        assert_eq!(catalog.total_bytes, data.len() as u64);
         fs::remove_dir_all(&root).await.unwrap();
     }
 
