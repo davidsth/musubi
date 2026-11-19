@@ -290,7 +290,9 @@ fn is_safe_payload_basename(value: &str) -> bool {
         && !value.contains('/')
         && !value.contains('\\')
         && !value.contains(':')
-        && !value.chars().any(|character| character.is_control())
+        && !value.chars().any(|character| {
+            character.is_control() || matches!(character, '<' | '>' | '"' | '|' | '?' | '*')
+        })
 }
 
 #[cfg(test)]
@@ -323,7 +325,13 @@ mod tests {
     #[test]
     fn validates_manifest_and_rejects_unsafe_payload_paths() {
         assert!(sample_manifest("weights.tensor", 32).validate().is_ok());
-        for path in ["../outside.tensor", "subdir/file.tensor", r"..\\outside.tensor", "C:outside.tensor"] {
+        for path in [
+            "../outside.tensor",
+            "subdir/file.tensor",
+            r"..\\outside.tensor",
+            "C:outside.tensor",
+            "invalid?.tensor",
+        ] {
             assert!(sample_manifest(path, 32).validate().is_err(), "accepted {path}");
         }
     }
