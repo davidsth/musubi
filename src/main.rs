@@ -65,7 +65,11 @@ enum Command {
     Discover { #[arg(long, default_value = "255.255.255.255:9001")] target: SocketAddr,
                #[arg(long, default_value_t = 1500)] wait_ms: u64 },
     /// List verified tensor artifacts in the local AITP tensor store.
-    Catalog { #[arg(long)] directory: Option<PathBuf> },
+    Catalog {
+        #[arg(long)] directory: Option<PathBuf>,
+        /// Recompute SHA-256 for each displayed payload (slower for large tensors).
+        #[arg(long, default_value_t = false)] verify_hashes: bool,
+    },
     /// Run a cluster manager that tracks registrations and node liveness.
     Manager { #[arg(long, default_value = "0.0.0.0:9002")] bind: SocketAddr,
               #[arg(long, default_value_t = 5000)] timeout_ms: u64,
@@ -85,7 +89,7 @@ async fn main() -> Result<()> {
             run_node(bind, data_port, name, manager, heartbeat_ms).await,
         Command::Discover { target, wait_ms } =>
             discover(target, Duration::from_millis(wait_ms)).await,
-        Command::Catalog { directory } => catalog_tensors(directory).await,
+        Command::Catalog { directory, verify_hashes } => catalog_tensors(directory, verify_hashes).await,
         Command::Manager { bind, timeout_ms, dashboard_bind } =>
             run_manager(bind, Duration::from_millis(timeout_ms.max(500)), dashboard_bind).await,
     }
@@ -96,7 +100,7 @@ fn make_header(kind: u8, message_id: u32, tensor_id: u32, sequence: u32, payload
         payload_len: payload.len() as u16, checksum: checksum(payload), worker_id: 0 }
 }
 
-async fn catalog_tensors(directory: Option<PathBuf>) -> Result<()> {
+async fn catalog_tensors(directory: Option<PathBuf>, verify_hashes: bool) -> Result<()> {
     let directory = directory.unwrap_or_else(storage::configured_store_dir);
     let snapshot = storage::scan_store(&directory).await?;
     println!(
@@ -105,16 +109,28 @@ async fn catalog_tensors(directory: Option<PathBuf>) -> Result<()> {
         snapshot.total_bytes as f64 / 1024.0_f64.powi(3),
         directory.display()
     );
+    let mut failed_hashes = 0usize;
     for manifest in &snapshot.recent {
+        let integrity = if verify_hashes {
+            if storage::verify_payload(&directory, manifest).await? {
+                "SHA-256 OK"
+            } else {
+                failed_hashes += 1;
+                "SHA-256 MISMATCH"
+            }
+        } else {
+            "not rehashed"
+        };
         println!(
-            "- {} | {:?} | {:?} | shape {:?} | {} bytes | {} | sha256 {}…",
+            "- {} | {:?} | {:?} | shape {:?} | {} bytes | {} | sha256 {}… | {}",
             manifest.descriptor.name,
             manifest.descriptor.dtype,
             manifest.descriptor.encoding,
             manifest.descriptor.shape,
             manifest.byte_len,
             manifest.payload_file,
-            &manifest.sha256[..16]
+            &manifest.sha256[..16],
+            integrity
         );
     }
     if snapshot.count > snapshot.recent.len() {
@@ -123,6 +139,12 @@ async fn catalog_tensors(directory: Option<PathBuf>) -> Result<()> {
             snapshot.recent.len(),
             snapshot.count
         );
+    }
+    if failed_hashes > 0 {
+        bail!("{failed_hashes} tensor payload(s) failed SHA-256 verification");
+    }
+    if verify_hashes {
+        println!("Verified SHA-256 for {} displayed tensor(s).", snapshot.recent.len());
     }
     Ok(())
 }
