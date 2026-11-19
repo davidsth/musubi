@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.10.0 — Verified streaming runtime handoff
+
+- Added a read-only runtime handoff API that validates a tensor manifest and opens its payload as a streaming reader.
+- Verifies regular-file type, exact byte length, and SHA-256 using the same open file handle returned to the adapter; rewinds the reader to byte zero.
+- Rejects final-component symbolic links on Unix and Windows reparse points on Windows.
+- Avoids copying the complete tensor into a second in-memory buffer.
+- Added the `prepare-tensor` CLI command for bounded sidecar parsing and targeted pre-handoff verification.
+- Added tests for reader contents, digest mismatch, and symbolic-link rejection on Unix.
+- No llama.cpp integration, model loading, workload scheduler, or remote execution added; the 32-byte data-plane header is unchanged.
+
 ## v0.9.0 — Durable tensor manifests and local catalog
 
 - Added versioned JSON sidecars for completed authenticated tensor payloads, including the typed descriptor, sender identity, offer sequence, transfer ID, exact byte length, commit timestamp, payload basename, and SHA-256 digest.
