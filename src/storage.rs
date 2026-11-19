@@ -12,7 +12,7 @@ use std::{
 };
 use tokio::{
     fs::{self, OpenOptions},
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
 };
 
 use crate::{control::TensorOfferMessage, tensor::TensorDescriptor};
@@ -264,6 +264,13 @@ pub async fn sha256_file(path: &Path) -> Result<String> {
     let mut file = fs::File::open(path)
         .await
         .with_context(|| format!("opening tensor payload for SHA-256: {}", path.display()))?;
+    sha256_open_file(&mut file).await
+}
+
+/// Hash an already-open payload and rewind it to byte zero. Runtime handoff
+/// uses this helper so verification and subsequent streaming share one handle.
+pub async fn sha256_open_file(file: &mut fs::File) -> Result<String> {
+    file.seek(std::io::SeekFrom::Start(0)).await?;
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
     loop {
@@ -273,6 +280,7 @@ pub async fn sha256_file(path: &Path) -> Result<String> {
         }
         hasher.update(&buffer[..count]);
     }
+    file.seek(std::io::SeekFrom::Start(0)).await?;
     let digest = hasher.finalize();
     let mut hex = String::with_capacity(64);
     for byte in digest {
