@@ -2,6 +2,7 @@ mod auth;
 mod control;
 mod dashboard;
 mod hardware;
+mod gguf;
 mod protocol;
 mod runtime;
 mod storage;
@@ -78,6 +79,16 @@ enum Command {
         /// Directory containing the payload (defaults to the manifest's parent directory).
         #[arg(long)] directory: Option<PathBuf>,
     },
+    /// Inspect GGUF model metadata and tensor descriptors without loading model weights.
+    InspectGguf {
+        #[arg(long)] input: PathBuf,
+        /// Number of tensor descriptors to print (maximum 128).
+        #[arg(long, default_value_t = 20)] tensor_limit: usize,
+    },
+    /// List GGUF models in AITP_MODEL_DIR (default: ./aitp-models).
+    GgufCatalog {
+        #[arg(long)] directory: Option<PathBuf>,
+    },
     /// Run a cluster manager that tracks registrations and node liveness.
     Manager { #[arg(long, default_value = "0.0.0.0:9002")] bind: SocketAddr,
               #[arg(long, default_value_t = 5000)] timeout_ms: u64,
@@ -99,6 +110,8 @@ async fn main() -> Result<()> {
             discover(target, Duration::from_millis(wait_ms)).await,
         Command::Catalog { directory, verify_hashes } => catalog_tensors(directory, verify_hashes).await,
         Command::PrepareTensor { manifest, directory } => prepare_tensor(manifest, directory).await,
+        Command::InspectGguf { input, tensor_limit } => inspect_gguf(input, tensor_limit),
+        Command::GgufCatalog { directory } => catalog_gguf(directory),
         Command::Manager { bind, timeout_ms, dashboard_bind } =>
             run_manager(bind, Duration::from_millis(timeout_ms.max(500)), dashboard_bind).await,
     }
@@ -191,6 +204,83 @@ async fn prepare_tensor(manifest_path: PathBuf, directory: Option<PathBuf>) -> R
     println!("A read-only streaming handle is open at byte 0. No bytes were copied into a second buffer or passed to a model runtime.");
     drop(prepared);
     Ok(())
+}
+
+fn inspect_gguf(input: PathBuf, tensor_limit: usize) -> Result<()> {
+    if tensor_limit > 128 {
+        bail!("--tensor-limit may not exceed 128");
+    }
+    let model = gguf::inspect_file(&input)?;
+    println!("GGUF model: {}", model.model_name.as_deref().unwrap_or(&model.filename));
+    println!("File: {} ({:.2} GiB)", model.filename, model.file_bytes as f64 / 1024.0_f64.powi(3));
+    println!("Format: v{} little-endian | alignment {} | data offset {}", model.version, model.alignment, model.data_offset);
+    println!("Architecture: {}", model.architecture.as_deref().unwrap_or("unknown"));
+    println!("Model version: {} | size label: {}",
+        model.model_version.as_deref().unwrap_or("unknown"),
+        model.model_size_label.as_deref().unwrap_or("unknown"));
+    println!("Layers: {} | context: {} | embedding: {} | feed-forward: {}",
+        display_optional(model.layer_count),
+        display_optional(model.context_length),
+        display_optional(model.embedding_length),
+        display_optional(model.feed_forward_length));
+    println!("Tensors: {} | estimated elements: {} | metadata keys: {}",
+        model.tensor_count, model.estimated_tensor_elements, model.metadata_count);
+    println!("Known tensor bytes: {:.2} GiB | unsupported type layouts: {}",
+        model.known_tensor_bytes as f64 / 1024.0_f64.powi(3), model.unsupported_tensor_count);
+    if let Some(value) = model.parameter_count_metadata {
+        println!("Metadata parameter count: {value}");
+    }
+    if let Some(value) = model.file_type {
+        println!("GGUF file type code: {value}");
+    }
+    if let Some(value) = model.quantization_version {
+        println!("Quantization version: {value}");
+    }
+
+    println!("Tensor type counts:");
+    for (type_name, count) in &model.tensor_type_counts {
+        println!("  {type_name}: {count}");
+    }
+
+    if tensor_limit > 0 {
+        println!("Tensor descriptors (first {}):", tensor_limit.min(model.tensors.len()));
+        for tensor in model.tensors.iter().take(tensor_limit) {
+            let bytes = tensor.byte_len.map(|value| format!("{value} bytes"))
+                .unwrap_or_else(|| "size unsupported by this inspector".into());
+            println!("  {} | {:?} | {} | offset {} | {}",
+                tensor.name, tensor.dimensions, tensor.type_name, tensor.file_offset, bytes);
+        }
+    }
+    if tensor_limit < model.tensors.len() {
+        println!("Showing {tensor_limit} of {} tensor descriptors.", model.tensors.len());
+    }
+    println!("No tensor payloads were read, allocated, or loaded into an inference runtime.");
+    Ok(())
+}
+
+fn catalog_gguf(directory: Option<PathBuf>) -> Result<()> {
+    let directory = directory.unwrap_or_else(gguf::configured_model_dir);
+    let catalog = gguf::scan_model_dir(&directory)?;
+    println!("AITP GGUF model catalog: {} valid model(s) in {}",
+        catalog.models.len(), directory.display());
+    println!("Scanned {} file(s), skipped {} invalid file(s), omitted {} file(s) above the scan limit.",
+        catalog.scanned_files, catalog.invalid_files, catalog.omitted_files);
+    for model in &catalog.models {
+        let identity = model.model_name.as_deref().unwrap_or(&model.filename);
+        println!("- {} | {} | {} | {:.2} GiB | {} tensors | layers {} | context {}",
+            identity,
+            model.architecture.as_deref().unwrap_or("unknown"),
+            model.model_size_label.as_deref().unwrap_or("size unknown"),
+            model.file_bytes as f64 / 1024.0_f64.powi(3),
+            model.tensor_count,
+            display_optional(model.layer_count),
+            display_optional(model.context_length));
+    }
+    Ok(())
+}
+
+fn display_optional(value: Option<u64>) -> String {
+    value.map(|number| number.to_string()).unwrap_or_else(|| "unknown".into())
 }
 
 async fn send(target: SocketAddr, input: PathBuf, tensor_id: u32) -> Result<()> {
