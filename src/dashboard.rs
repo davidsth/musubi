@@ -1,7 +1,7 @@
 //! Read-only HTTP dashboard for the cluster manager. No control actions are exposed.
 use axum::{extract::State, response::Html, routing::get, Json, Router};
 use serde::Serialize;
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{net::TcpListener, sync::RwLock};
 
 pub const DASHBOARD_HTML: &str = include_str!("../web/dashboard.html");
@@ -14,6 +14,8 @@ pub struct ClusterSnapshot {
     pub offline_nodes: usize,
     /// Manifests and payloads visible in the dashboard host's local tensor directory.
     pub tensor_store: crate::storage::TensorStoreSnapshot,
+    /// Local GGUF headers/tensor tables found under AITP_MODEL_DIR.
+    pub model_store: crate::gguf::GgufModelCatalog,
     pub updated_at_unix: u64,
 }
 
@@ -38,6 +40,29 @@ pub fn shared_snapshot() -> SharedSnapshot {
 }
 
 pub async fn serve(bind: SocketAddr, snapshot: SharedSnapshot) -> anyhow::Result<()> {
+    let model_snapshot = snapshot.clone();
+    tokio::spawn(async move {
+        let mut refresh = tokio::time::interval(Duration::from_secs(30));
+        loop {
+            refresh.tick().await;
+            let directory = crate::gguf::configured_model_dir();
+            let scanned = tokio::task::spawn_blocking(move || {
+                crate::gguf::scan_model_dir(&directory)
+            }).await;
+            match scanned {
+                Ok(Ok(catalog)) => {
+                    model_snapshot.write().await.model_store = catalog;
+                }
+                Ok(Err(error)) => {
+                    eprintln!("AITP GGUF catalog scan failed: {error:#}");
+                }
+                Err(error) => {
+                    eprintln!("AITP GGUF catalog task failed: {error}");
+                }
+            }
+        }
+    });
+
     let app = Router::new()
         .route("/", get(index))
         .route("/api/cluster", get(cluster))
@@ -68,6 +93,7 @@ mod tests {
         assert_eq!(value["online_nodes"], 0);
         assert_eq!(value["tensor_store"]["count"], 0);
         assert_eq!(value["tensor_store"]["recent"].as_array().unwrap().len(), 0);
+        assert_eq!(value["model_store"]["models"].as_array().unwrap().len(), 0);
     }
 
     #[test]
@@ -76,5 +102,7 @@ mod tests {
         assert!(!DASHBOARD_HTML.contains("eval("));
         assert!(DASHBOARD_HTML.contains("Stored tensor artifacts"));
         assert!(DASHBOARD_HTML.contains("s.tensor_store"));
+        assert!(DASHBOARD_HTML.contains("Local GGUF models"));
+        assert!(DASHBOARD_HTML.contains("s.model_store"));
     }
 }
