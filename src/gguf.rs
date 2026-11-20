@@ -942,10 +942,22 @@ mod tests {
 
     #[test]
     fn rejects_truncated_payload_ranges_and_invalid_alignment() {
-        let mut bytes = fixture();
-        bytes.truncate(bytes.len() - 8);
-        let mut cursor = Cursor::new(bytes.clone());
-        assert!(parse_reader(&mut cursor, bytes.len() as u64, "truncated.gguf".into()).is_err());
+        let valid = fixture();
+        let mut valid_cursor = Cursor::new(valid.clone());
+        let parsed = parse_reader(
+            &mut valid_cursor,
+            valid.len() as u64,
+            "valid.gguf".into(),
+        ).unwrap();
+        // The first Q4_0 tensor needs 36 bytes. Truncate it one byte short.
+        let mut truncated = valid;
+        truncated.truncate(parsed.data_offset as usize + 35);
+        let mut cursor = Cursor::new(truncated.clone());
+        assert!(parse_reader(
+            &mut cursor,
+            truncated.len() as u64,
+            "truncated.gguf".into()
+        ).is_err());
 
         let mut invalid = fixture();
         // The alignment metadata value is after its type tag; find the encoded key.
