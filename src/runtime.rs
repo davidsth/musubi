@@ -198,7 +198,9 @@ mod tests {
     #[tokio::test]
     async fn rejects_payload_modified_after_manifest_creation() {
         let (root, _, manifest) = test_store().await;
-        fs::write(root.join("weights.tensor"), b"tampered").await.unwrap();
+        fs::write(root.join("weights.tensor"), b"tampered")
+            .await
+            .unwrap();
         assert!(open_verified_tensor(&root, &manifest).await.is_err());
         fs::remove_dir_all(root).await.unwrap();
     }

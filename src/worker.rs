@@ -149,15 +149,24 @@ impl OfferAdmission {
     }
 
     /// Consume the metadata reservation once the corresponding tensor is committed.
-    pub fn remove_pending(&mut self, sender_node_id: &str, message_id: u32) -> Option<PendingTensorOffer> {
-        self.pending.remove(&(sender_node_id.to_owned(), message_id))
+    pub fn remove_pending(
+        &mut self,
+        sender_node_id: &str,
+        message_id: u32,
+    ) -> Option<PendingTensorOffer> {
+        self.pending
+            .remove(&(sender_node_id.to_owned(), message_id))
     }
 
     pub fn pending_count(&self) -> usize {
         self.pending.len()
     }
 
-    pub fn pending_for(&self, sender_node_id: &str, message_id: u32) -> Option<&PendingTensorOffer> {
+    pub fn pending_for(
+        &self,
+        sender_node_id: &str,
+        message_id: u32,
+    ) -> Option<&PendingTensorOffer> {
         self.pending.get(&(sender_node_id.to_owned(), message_id))
     }
 }
@@ -168,10 +177,16 @@ mod tests {
     use crate::{
         auth::sign_tensor_offer,
         control::TensorOfferMessage,
-        tensor::{TensorDescriptor, TensorDType, TensorEncoding, TensorLayout},
+        tensor::{TensorDType, TensorDescriptor, TensorEncoding, TensorLayout},
     };
 
-    fn signed_offer(key: &[u8], sender: &str, sequence: u64, message_id: u32, bytes: u64) -> TensorOfferMessage {
+    fn signed_offer(
+        key: &[u8],
+        sender: &str,
+        sequence: u64,
+        message_id: u32,
+        bytes: u64,
+    ) -> TensorOfferMessage {
         let mut offer = TensorOfferMessage {
             version: CONTROL_VERSION,
             sender_node_id: sender.into(),
@@ -245,7 +260,9 @@ mod tests {
         assert!(admission.pending_for_peer(peer(), 101, 7).is_some());
         assert!(admission.pending_for_peer(peer(), 102, 7).is_none());
         assert!(admission.pending_for_peer(peer(), 101, 8).is_none());
-        assert!(admission.pending_for_peer("127.0.0.1:40001".parse().unwrap(), 101, 7).is_none());
+        assert!(admission
+            .pending_for_peer("127.0.0.1:40001".parse().unwrap(), 101, 7)
+            .is_none());
         assert!(admission.remove_pending("sender-a", 101).is_some());
         assert_eq!(admission.pending_count(), 0);
     }
@@ -259,6 +276,8 @@ mod tests {
         admission.admit(&offer, peer(), &key, now).unwrap();
         assert_eq!(admission.expire(now + Duration::from_secs(2)), 1);
         assert_eq!(admission.pending_count(), 0);
-        assert!(admission.admit(&offer, peer(), &key, now + Duration::from_secs(2)).is_err());
+        assert!(admission
+            .admit(&offer, peer(), &key, now + Duration::from_secs(2))
+            .is_err());
     }
 }

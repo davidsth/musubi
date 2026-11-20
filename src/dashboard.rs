@@ -46,9 +46,8 @@ pub async fn serve(bind: SocketAddr, snapshot: SharedSnapshot) -> anyhow::Result
         loop {
             refresh.tick().await;
             let directory = crate::gguf::configured_model_dir();
-            let scanned = tokio::task::spawn_blocking(move || {
-                crate::gguf::scan_model_dir(&directory)
-            }).await;
+            let scanned =
+                tokio::task::spawn_blocking(move || crate::gguf::scan_model_dir(&directory)).await;
             match scanned {
                 Ok(Ok(catalog)) => {
                     model_snapshot.write().await.model_store = catalog;
@@ -68,7 +67,10 @@ pub async fn serve(bind: SocketAddr, snapshot: SharedSnapshot) -> anyhow::Result
         .route("/api/cluster", get(cluster))
         .with_state(snapshot);
     let listener = TcpListener::bind(bind).await?;
-    println!("AITP dashboard listening at http://{}", listener.local_addr()?);
+    println!(
+        "AITP dashboard listening at http://{}",
+        listener.local_addr()?
+    );
     axum::serve(listener, app).await?;
     Ok(())
 }

@@ -28,8 +28,8 @@ fn new_mac(key: &[u8], domain: &[u8]) -> Result<HmacSha256> {
     if key.len() < MIN_CLUSTER_KEY_BYTES {
         bail!("cluster key is too short");
     }
-    let mut mac = HmacSha256::new_from_slice(key)
-        .map_err(|_| anyhow::anyhow!("invalid HMAC key"))?;
+    let mut mac =
+        HmacSha256::new_from_slice(key).map_err(|_| anyhow::anyhow!("invalid HMAC key"))?;
     mac.update(domain);
     Ok(mac)
 }
@@ -92,7 +92,6 @@ pub fn sign_tensor_offer_reply(reply: &mut TensorOfferReply, key: &[u8]) -> Resu
     reply.auth_tag = reply_mac(key, reply)?;
     Ok(())
 }
-
 
 /// Produce a per-datagram tag for the binary tensor data plane. The fixed
 /// 32-byte header is authenticated as-is; the tag is appended after payload.
@@ -157,7 +156,7 @@ mod tests {
     use super::*;
     use crate::{
         control::CONTROL_VERSION,
-        tensor::{TensorDescriptor, TensorDType, TensorEncoding, TensorLayout},
+        tensor::{TensorDType, TensorDescriptor, TensorEncoding, TensorLayout},
     };
 
     fn sample_offer(key: &[u8]) -> TensorOfferMessage {
@@ -210,14 +209,18 @@ mod tests {
         assert!(!verify_tensor_offer_reply(&reply, &key).unwrap());
     }
 
-
     #[test]
     fn tensor_packet_tag_binds_header_payload_and_offer() {
         let key = [0x44; 32];
         let header = crate::protocol::Header {
-            kind: crate::protocol::KIND_DATA, flags: 0, message_id: 9,
-            tensor_id: 7, sequence: 1, payload_len: 3,
-            checksum: crate::protocol::checksum(b"abc"), worker_id: 0,
+            kind: crate::protocol::KIND_DATA,
+            flags: 0,
+            message_id: 9,
+            tensor_id: 7,
+            sequence: 1,
+            payload_len: 3,
+            checksum: crate::protocol::checksum(b"abc"),
+            worker_id: 0,
         };
         let tag = tensor_packet_tag(&key, "sender", 12, &header, b"abc").unwrap();
         assert!(verify_tensor_packet(&key, "sender", 12, &header, b"abc", &tag).unwrap());

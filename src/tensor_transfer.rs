@@ -23,11 +23,11 @@ use tokio::{
 use crate::{
     auth,
     control::TensorOfferMessage,
-    storage,
     protocol::{
-        self, Header, AUTH_TAG_LEN, KIND_ACK, KIND_DATA, KIND_FIN, KIND_FIN_ACK,
-        MAX_AUTH_PAYLOAD, MAX_DATAGRAM, HEADER_LEN,
+        self, Header, AUTH_TAG_LEN, HEADER_LEN, KIND_ACK, KIND_DATA, KIND_FIN, KIND_FIN_ACK,
+        MAX_AUTH_PAYLOAD, MAX_DATAGRAM,
     },
+    storage,
     worker::{OfferAdmission, PendingTensorOffer},
 };
 
@@ -330,7 +330,11 @@ pub async fn send_tensor_data(
             packets.push((
                 sequence,
                 make_authenticated_packet(
-                    key, &offer.sender_node_id, offer.sequence, header, &payload
+                    key,
+                    &offer.sender_node_id,
+                    offer.sequence,
+                    header,
+                    &payload,
                 )?,
             ));
         }
@@ -339,7 +343,9 @@ pub async fn send_tensor_data(
         let mut attempts = 0usize;
         while acknowledged.iter().any(|value| !value) {
             for (index, (sequence, packet)) in packets.iter().enumerate() {
-                if acknowledged[index] { continue; }
+                if acknowledged[index] {
+                    continue;
+                }
                 socket.send_to(packet, data_target).await?;
                 tokio::time::sleep(SEND_PACING).await;
                 let _ = sequence;
@@ -347,11 +353,16 @@ pub async fn send_tensor_data(
 
             let deadline = tokio::time::Instant::now() + ACK_WAIT;
             let mut buffer = [0u8; MAX_DATAGRAM];
-            while tokio::time::Instant::now() < deadline && acknowledged.iter().any(|value| !value) {
+            while tokio::time::Instant::now() < deadline && acknowledged.iter().any(|value| !value)
+            {
                 let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
                 match timeout(remaining, socket.recv_from(&mut buffer)).await {
                     Ok(Ok((n, peer))) if peer == data_target => {
-                        let Some((header, payload, tag)) = decode_authenticated_datagram(&buffer[..n]) else { continue };
+                        let Some((header, payload, tag)) =
+                            decode_authenticated_datagram(&buffer[..n])
+                        else {
+                            continue;
+                        };
                         if header.kind != KIND_ACK
                             || header.message_id != offer.message_id
                             || header.tensor_id != offer.descriptor.tensor_id
@@ -360,8 +371,14 @@ pub async fn send_tensor_data(
                             || header.worker_id != 0
                             || protocol::checksum(payload) != header.checksum
                             || !auth::verify_tensor_packet(
-                                key, &offer.sender_node_id, offer.sequence, &header, payload, tag
-                            )? {
+                                key,
+                                &offer.sender_node_id,
+                                offer.sequence,
+                                &header,
+                                payload,
+                                tag,
+                            )?
+                        {
                             continue;
                         }
                         let seq = header.sequence;
@@ -392,7 +409,8 @@ pub async fn send_tensor_data(
     let fin_payload = [
         total_chunks.to_be_bytes().as_slice(),
         byte_len.to_be_bytes().as_slice(),
-    ].concat();
+    ]
+    .concat();
     let fin_header = Header {
         kind: KIND_FIN,
         flags: 0,
@@ -404,14 +422,21 @@ pub async fn send_tensor_data(
         worker_id: 0,
     };
     let fin = make_authenticated_packet(
-        key, &offer.sender_node_id, offer.sequence, fin_header, &fin_payload
+        key,
+        &offer.sender_node_id,
+        offer.sequence,
+        fin_header,
+        &fin_payload,
     )?;
     let mut buffer = [0u8; MAX_DATAGRAM];
     for _ in 0..RETRY_LIMIT {
         socket.send_to(&fin, data_target).await?;
         match timeout(FIN_ACK_WAIT, socket.recv_from(&mut buffer)).await {
             Ok(Ok((n, peer))) if peer == data_target => {
-                let Some((header, payload, tag)) = decode_authenticated_datagram(&buffer[..n]) else { continue };
+                let Some((header, payload, tag)) = decode_authenticated_datagram(&buffer[..n])
+                else {
+                    continue;
+                };
                 if header.kind == KIND_FIN_ACK
                     && header.message_id == offer.message_id
                     && header.tensor_id == offer.descriptor.tensor_id
@@ -421,8 +446,14 @@ pub async fn send_tensor_data(
                     && header.worker_id == 0
                     && protocol::checksum(payload) == header.checksum
                     && auth::verify_tensor_packet(
-                        key, &offer.sender_node_id, offer.sequence, &header, payload, tag
-                    )? {
+                        key,
+                        &offer.sender_node_id,
+                        offer.sequence,
+                        &header,
+                        payload,
+                        tag,
+                    )?
+                {
                     println!("authenticated tensor transfer complete");
                     return Ok(());
                 }
@@ -475,8 +506,7 @@ fn authenticated_control_packet(
 fn decode_authenticated_datagram(buffer: &[u8]) -> Option<(Header, &[u8], &[u8])> {
     let header = Header::decode(buffer).ok()?;
     let payload_len = usize::from(header.payload_len);
-    if payload_len > MAX_AUTH_PAYLOAD
-        || buffer.len() != HEADER_LEN + payload_len + AUTH_TAG_LEN {
+    if payload_len > MAX_AUTH_PAYLOAD || buffer.len() != HEADER_LEN + payload_len + AUTH_TAG_LEN {
         return None;
     }
     let payload_end = HEADER_LEN + payload_len;
@@ -549,11 +579,17 @@ fn verify_fin(
     if payload.len() != 12
         || header.sequence != done.total_chunks
         || u32::from_be_bytes(payload[0..4].try_into()?) != done.total_chunks
-        || u64::from_be_bytes(payload[4..12].try_into()?) != done.byte_len {
+        || u64::from_be_bytes(payload[4..12].try_into()?) != done.byte_len
+    {
         return Ok(false);
     }
     auth::verify_tensor_packet(
-        key, &done.sender_node_id, done.offer_sequence, header, payload, tag
+        key,
+        &done.sender_node_id,
+        done.offer_sequence,
+        header,
+        payload,
+        tag,
     )
 }
 
@@ -566,7 +602,7 @@ mod tests {
         use crate::{
             auth::sign_tensor_offer,
             control::{TensorOfferMessage, CONTROL_VERSION},
-            tensor::{TensorDescriptor, TensorDType, TensorEncoding, TensorLayout},
+            tensor::{TensorDType, TensorDescriptor, TensorEncoding, TensorLayout},
         };
 
         let root = std::env::temp_dir().join(format!("aitp-e2e-{}", uuid::Uuid::new_v4()));
@@ -647,9 +683,21 @@ mod tests {
         manifest.validate().unwrap();
         assert_eq!(manifest.descriptor.name, "integration.test.tensor");
         assert_eq!(manifest.byte_len, data.len() as u64);
-        assert_eq!(manifest.payload_file, committed_path.file_name().unwrap().to_string_lossy().to_string());
-        assert_eq!(storage::sha256_file(&committed_path).await.unwrap(), manifest.sha256);
-        assert!(storage::verify_payload(&output_dir, &manifest).await.unwrap());
+        assert_eq!(
+            manifest.payload_file,
+            committed_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string()
+        );
+        assert_eq!(
+            storage::sha256_file(&committed_path).await.unwrap(),
+            manifest.sha256
+        );
+        assert!(storage::verify_payload(&output_dir, &manifest)
+            .await
+            .unwrap());
         let catalog = storage::scan_store(&output_dir).await.unwrap();
         assert_eq!(catalog.count, 1);
         assert_eq!(catalog.total_bytes, data.len() as u64);
@@ -677,7 +725,10 @@ mod tests {
         }
         assert_eq!(completed.len(), MAX_COMPLETED_TRANSFERS);
         assert_eq!(completed.first().unwrap().message_id, 1);
-        assert_eq!(completed.last().unwrap().message_id, MAX_COMPLETED_TRANSFERS as u32);
+        assert_eq!(
+            completed.last().unwrap().message_id,
+            MAX_COMPLETED_TRANSFERS as u32
+        );
     }
 
     #[test]
@@ -685,16 +736,23 @@ mod tests {
         let key = [0x21; 32];
         let payload = vec![7u8; MAX_AUTH_PAYLOAD];
         let header = Header {
-            kind: KIND_DATA, flags: 0, message_id: 2, tensor_id: 3,
-            sequence: 4, payload_len: payload.len() as u16,
-            checksum: protocol::checksum(&payload), worker_id: 0,
+            kind: KIND_DATA,
+            flags: 0,
+            message_id: 2,
+            tensor_id: 3,
+            sequence: 4,
+            payload_len: payload.len() as u16,
+            checksum: protocol::checksum(&payload),
+            worker_id: 0,
         };
         let packet = make_authenticated_packet(&key, "sender", 5, header, &payload).unwrap();
         assert_eq!(packet.len(), MAX_DATAGRAM);
         let (decoded, decoded_payload, tag) = decode_authenticated_datagram(&packet).unwrap();
         assert_eq!(decoded.encode(), header.encode());
         assert_eq!(decoded_payload, payload);
-        assert!(auth::verify_tensor_packet(&key, "sender", 5, &decoded, decoded_payload, tag).unwrap());
+        assert!(
+            auth::verify_tensor_packet(&key, "sender", 5, &decoded, decoded_payload, tag).unwrap()
+        );
     }
 
     #[test]
@@ -702,9 +760,14 @@ mod tests {
         let key = [0x21; 32];
         let payload = vec![1u8; MAX_AUTH_PAYLOAD];
         let header = Header {
-            kind: KIND_DATA, flags: 0, message_id: 2, tensor_id: 3,
-            sequence: 0, payload_len: payload.len() as u16,
-            checksum: protocol::checksum(&payload), worker_id: 0,
+            kind: KIND_DATA,
+            flags: 0,
+            message_id: 2,
+            tensor_id: 3,
+            sequence: 0,
+            payload_len: payload.len() as u16,
+            checksum: protocol::checksum(&payload),
+            worker_id: 0,
         };
         let packet = make_authenticated_packet(&key, "sender", 1, header, &payload).unwrap();
         assert!(decode_authenticated_datagram(&packet[..packet.len() - 1]).is_none());
@@ -718,16 +781,21 @@ mod tests {
         assert_eq!(chunk_count(1).unwrap(), 1);
         assert_eq!(chunk_count(MAX_AUTH_PAYLOAD as u64).unwrap(), 1);
         assert_eq!(chunk_count(MAX_AUTH_PAYLOAD as u64 + 1).unwrap(), 2);
-        assert_eq!(expected_chunk_len(MAX_AUTH_PAYLOAD as u64 + 1, 0).unwrap(), MAX_AUTH_PAYLOAD);
-        assert_eq!(expected_chunk_len(MAX_AUTH_PAYLOAD as u64 + 1, 1).unwrap(), 1);
+        assert_eq!(
+            expected_chunk_len(MAX_AUTH_PAYLOAD as u64 + 1, 0).unwrap(),
+            MAX_AUTH_PAYLOAD
+        );
+        assert_eq!(
+            expected_chunk_len(MAX_AUTH_PAYLOAD as u64 + 1, 1).unwrap(),
+            1
+        );
         assert!(expected_chunk_len(12, 1).is_err());
     }
 
     #[test]
     fn transfer_paths_do_not_use_untrusted_tensor_names() {
-        let (partial, final_path) = tensor_paths(
-            Path::new("aitp-tensors"), "../../etc/passwd", 1, 2, 3
-        );
+        let (partial, final_path) =
+            tensor_paths(Path::new("aitp-tensors"), "../../etc/passwd", 1, 2, 3);
         assert!(partial.starts_with("aitp-tensors"));
         assert!(final_path.starts_with("aitp-tensors"));
         assert!(final_path.to_string_lossy().ends_with(".tensor"));

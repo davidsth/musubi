@@ -48,9 +48,15 @@ impl Header {
     }
 
     pub fn decode(buf: &[u8]) -> Result<Self> {
-        if buf.len() < HEADER_LEN { bail!("short AITP packet"); }
-        if buf[0..4] != MAGIC { bail!("invalid AITP magic"); }
-        if buf[4] != VERSION { bail!("unsupported AITP version: {}", buf[4]); }
+        if buf.len() < HEADER_LEN {
+            bail!("short AITP packet");
+        }
+        if buf[0..4] != MAGIC {
+            bail!("invalid AITP magic");
+        }
+        if buf[4] != VERSION {
+            bail!("unsupported AITP version: {}", buf[4]);
+        }
         Ok(Self {
             kind: buf[5],
             flags: u16::from_be_bytes([buf[6], buf[7]]),
@@ -71,7 +77,9 @@ pub fn packet(header: Header, payload: &[u8]) -> Vec<u8> {
     out
 }
 
-pub fn checksum(payload: &[u8]) -> u32 { crc32fast::hash(payload) }
+pub fn checksum(payload: &[u8]) -> u32 {
+    crc32fast::hash(payload)
+}
 
 #[cfg(test)]
 mod tests {
@@ -86,8 +94,16 @@ mod tests {
 
     #[test]
     fn header_is_exactly_32_bytes_and_round_trips() {
-        let h = Header { kind: KIND_DATA, flags: 7, message_id: 10, tensor_id: 20,
-            sequence: 30, payload_len: 99, checksum: 1234, worker_id: 40 };
+        let h = Header {
+            kind: KIND_DATA,
+            flags: 7,
+            message_id: 10,
+            tensor_id: 20,
+            sequence: 30,
+            payload_len: 99,
+            checksum: 1234,
+            worker_id: 40,
+        };
         let bytes = h.encode();
         assert_eq!(bytes.len(), 32);
         let decoded = Header::decode(&bytes).unwrap();

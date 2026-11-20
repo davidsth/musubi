@@ -219,15 +219,15 @@ pub fn scan_model_dir(directory: &Path) -> Result<GgufModelCatalog> {
         let file_type = entry.file_type()?;
         let path = entry.path();
         if file_type.is_file()
-            && path.extension().and_then(|value| value.to_str())
+            && path
+                .extension()
+                .and_then(|value| value.to_str())
                 .is_some_and(|value| value.eq_ignore_ascii_case("gguf"))
         {
             paths.push(path);
         }
     }
-    paths.sort_by(|left, right| {
-        left.file_name().cmp(&right.file_name())
-    });
+    paths.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
 
     let omitted_files = paths.len().saturating_sub(MAX_MODELS_TO_SCAN);
     paths.truncate(MAX_MODELS_TO_SCAN);
@@ -256,13 +256,17 @@ pub fn parse_reader<R: Read + Seek>(
     filename: String,
 ) -> Result<GgufModelSummary> {
     let mut magic = [0u8; 4];
-    reader.read_exact(&mut magic).context("reading GGUF magic")?;
+    reader
+        .read_exact(&mut magic)
+        .context("reading GGUF magic")?;
     if &magic != b"GGUF" {
         bail!("not a GGUF file: invalid magic");
     }
 
     let mut version_bytes = [0u8; 4];
-    reader.read_exact(&mut version_bytes).context("reading GGUF version")?;
+    reader
+        .read_exact(&mut version_bytes)
+        .context("reading GGUF version")?;
     let version = u32::from_le_bytes(version_bytes);
     if !matches!(version, 2 | 3) {
         let big_endian_version = u32::from_be_bytes(version_bytes);
@@ -278,7 +282,9 @@ pub fn parse_reader<R: Read + Seek>(
         bail!("GGUF tensor count {tensor_count} exceeds the safety limit {MAX_TENSORS}");
     }
     if metadata_count > MAX_METADATA_ENTRIES {
-        bail!("GGUF metadata count {metadata_count} exceeds the safety limit {MAX_METADATA_ENTRIES}");
+        bail!(
+            "GGUF metadata count {metadata_count} exceeds the safety limit {MAX_METADATA_ENTRIES}"
+        );
     }
 
     let mut architecture = None;
@@ -331,32 +337,76 @@ pub fn parse_reader<R: Read + Seek>(
                 alignment = read_u32(reader)?;
             }
             "general.file_type" => {
-                file_type = Some(read_selected_u32(reader, file_len, value_type, &key, &mut skip_budget)?);
+                file_type = Some(read_selected_u32(
+                    reader,
+                    file_len,
+                    value_type,
+                    &key,
+                    &mut skip_budget,
+                )?);
             }
             "general.quantization_version" => {
-                quantization_version = Some(read_selected_u32(reader, file_len, value_type, &key, &mut skip_budget)?);
+                quantization_version = Some(read_selected_u32(
+                    reader,
+                    file_len,
+                    value_type,
+                    &key,
+                    &mut skip_budget,
+                )?);
             }
             "general.parameter_count" => {
-                parameter_count_metadata = read_selected_optional_u64(reader, file_len, value_type, &key, &mut skip_budget)?;
+                parameter_count_metadata = read_selected_optional_u64(
+                    reader,
+                    file_len,
+                    value_type,
+                    &key,
+                    &mut skip_budget,
+                )?;
             }
             _ if key.ends_with(".block_count") => {
-                layer_count = read_selected_optional_u64(reader, file_len, value_type, &key, &mut skip_budget)?;
+                layer_count = read_selected_optional_u64(
+                    reader,
+                    file_len,
+                    value_type,
+                    &key,
+                    &mut skip_budget,
+                )?;
             }
             _ if key.ends_with(".context_length") => {
-                context_length = read_selected_optional_u64(reader, file_len, value_type, &key, &mut skip_budget)?;
+                context_length = read_selected_optional_u64(
+                    reader,
+                    file_len,
+                    value_type,
+                    &key,
+                    &mut skip_budget,
+                )?;
             }
             _ if key.ends_with(".embedding_length") => {
-                embedding_length = read_selected_optional_u64(reader, file_len, value_type, &key, &mut skip_budget)?;
+                embedding_length = read_selected_optional_u64(
+                    reader,
+                    file_len,
+                    value_type,
+                    &key,
+                    &mut skip_budget,
+                )?;
             }
             _ if key.ends_with(".feed_forward_length") => {
-                feed_forward_length = read_selected_optional_u64(reader, file_len, value_type, &key, &mut skip_budget)?;
+                feed_forward_length = read_selected_optional_u64(
+                    reader,
+                    file_len,
+                    value_type,
+                    &key,
+                    &mut skip_budget,
+                )?;
             }
             _ => skip_value(reader, file_len, value_type, 0, &mut skip_budget)?,
         }
     }
 
     if !(8..=MAX_ALIGNMENT).contains(&alignment) || alignment % 8 != 0 {
-        bail!("GGUF alignment must be a multiple of 8 between 8 and {MAX_ALIGNMENT}, got {alignment}");
+        bail!(
+            "GGUF alignment must be a multiple of 8 between 8 and {MAX_ALIGNMENT}, got {alignment}"
+        );
     }
 
     let descriptor_end = reader.stream_position()?;
@@ -419,7 +469,9 @@ pub fn parse_reader<R: Read + Seek>(
                     bail!("GGUF tensor '{name}' dimension 0 is not divisible by type block size {block_elements}");
                 }
                 let rows = dimensions.iter().skip(1).try_fold(1u64, |total, value| {
-                    total.checked_mul(*value).context("GGUF tensor row count overflow")
+                    total
+                        .checked_mul(*value)
+                        .context("GGUF tensor row count overflow")
                 })?;
                 let bytes = (inner / block_elements)
                     .checked_mul(bytes_per_block)
@@ -470,7 +522,11 @@ pub fn parse_reader<R: Read + Seek>(
     ranges.sort_by_key(|range| range.0);
     for pair in ranges.windows(2) {
         if pair[1].0 < pair[0].1 {
-            bail!("GGUF known-size tensors '{}' and '{}' overlap", pair[0].2, pair[1].2);
+            bail!(
+                "GGUF known-size tensors '{}' and '{}' overlap",
+                pair[0].2,
+                pair[1].2
+            );
         }
     }
 
@@ -522,8 +578,9 @@ fn read_selected_u32<R: Read + Seek>(
     key: &str,
     budget: &mut u64,
 ) -> Result<u32> {
-    let value = read_selected_optional_u64(reader, file_len, value_type, key, budget)?
-        .context(format!("GGUF metadata key '{key}' must be an unsigned integer"))?;
+    let value = read_selected_optional_u64(reader, file_len, value_type, key, budget)?.context(
+        format!("GGUF metadata key '{key}' must be an unsigned integer"),
+    )?;
     u32::try_from(value).with_context(|| format!("GGUF metadata key '{key}' exceeds uint32"))
 }
 
@@ -643,7 +700,9 @@ fn read_string<R: Read + Seek>(reader: &mut R, file_len: u64, max_len: u64) -> R
         bail!("GGUF string length {length} exceeds the limit {max_len}");
     }
     let position = reader.stream_position()?;
-    let end = position.checked_add(length).context("GGUF string offset overflow")?;
+    let end = position
+        .checked_add(length)
+        .context("GGUF string offset overflow")?;
     if end > file_len {
         bail!("GGUF string extends beyond the file");
     }
@@ -655,7 +714,9 @@ fn read_string<R: Read + Seek>(reader: &mut R, file_len: u64, max_len: u64) -> R
 
 fn skip_bytes<R: Read + Seek>(reader: &mut R, file_len: u64, length: u64) -> Result<()> {
     let position = reader.stream_position()?;
-    let end = position.checked_add(length).context("GGUF skip offset overflow")?;
+    let end = position
+        .checked_add(length)
+        .context("GGUF skip offset overflow")?;
     if end > file_len {
         bail!("GGUF metadata value extends beyond the file");
     }
@@ -850,7 +911,10 @@ mod tests {
     fn reports_unknown_tensor_types_without_guessing_their_sizes() {
         let mut bytes = fixture();
         let name = b"blk.0.attn_q.weight";
-        let position = bytes.windows(name.len()).position(|window| window == name).unwrap();
+        let position = bytes
+            .windows(name.len())
+            .position(|window| window == name)
+            .unwrap();
         let type_pos = position + name.len() + 4 + 8 + 8;
         bytes[type_pos..type_pos + 4].copy_from_slice(&999u32.to_le_bytes());
 
@@ -886,18 +950,29 @@ mod tests {
         let mut invalid = fixture();
         // The alignment metadata value is after its type tag; find the encoded key.
         let key = b"general.alignment";
-        let position = invalid.windows(key.len()).position(|window| window == key).unwrap();
+        let position = invalid
+            .windows(key.len())
+            .position(|window| window == key)
+            .unwrap();
         let value_pos = position + key.len() + 4;
         invalid[value_pos..value_pos + 4].copy_from_slice(&7u32.to_le_bytes());
         let mut cursor = Cursor::new(invalid.clone());
-        assert!(parse_reader(&mut cursor, invalid.len() as u64, "bad-alignment.gguf".into()).is_err());
+        assert!(parse_reader(
+            &mut cursor,
+            invalid.len() as u64,
+            "bad-alignment.gguf".into()
+        )
+        .is_err());
     }
 
     #[test]
     fn rejects_overlapping_tensor_ranges() {
         let mut bytes = fixture();
         let name = b"output.weight";
-        let position = bytes.windows(name.len()).position(|window| window == name).unwrap();
+        let position = bytes
+            .windows(name.len())
+            .position(|window| window == name)
+            .unwrap();
         let offset_pos = position + name.len() + 4 + 8 + 8 + 4;
         bytes[offset_pos..offset_pos + 8].copy_from_slice(&32u64.to_le_bytes());
         let mut cursor = Cursor::new(bytes.clone());
@@ -914,7 +989,9 @@ mod tests {
         let mut bad_version = fixture();
         bad_version[4..8].copy_from_slice(&99u32.to_le_bytes());
         let mut cursor = Cursor::new(bad_version.clone());
-        assert!(parse_reader(&mut cursor, bad_version.len() as u64, "version.gguf".into()).is_err());
+        assert!(
+            parse_reader(&mut cursor, bad_version.len() as u64, "version.gguf".into()).is_err()
+        );
 
         let mut excessive = fixture();
         excessive[8..16].copy_from_slice(&(MAX_TENSORS + 1).to_le_bytes());

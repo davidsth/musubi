@@ -113,7 +113,10 @@ pub async fn commit_tensor_file(
         bail!("staged tensor length does not match the admitted descriptor");
     }
     if fs::try_exists(final_path).await? {
-        bail!("refusing to overwrite existing tensor payload {}", final_path.display());
+        bail!(
+            "refusing to overwrite existing tensor payload {}",
+            final_path.display()
+        );
     }
 
     let digest = sha256_file(partial_path).await?;
@@ -136,16 +139,17 @@ pub async fn commit_tensor_file(
 
     let manifest_path = manifest_path_for_payload(final_path);
     if fs::try_exists(&manifest_path).await? {
-        bail!("refusing to overwrite existing tensor manifest {}", manifest_path.display());
+        bail!(
+            "refusing to overwrite existing tensor manifest {}",
+            manifest_path.display()
+        );
     }
     let manifest_name = manifest_path
         .file_name()
         .and_then(|name| name.to_str())
         .context("tensor manifest path has no UTF-8 filename")?;
-    let temporary_manifest = manifest_path.with_file_name(format!(
-        "{manifest_name}.{}.part",
-        uuid::Uuid::new_v4()
-    ));
+    let temporary_manifest =
+        manifest_path.with_file_name(format!("{manifest_name}.{}.part", uuid::Uuid::new_v4()));
     let encoded = serde_json::to_vec_pretty(&manifest)?;
     if encoded.len() as u64 > MAX_MANIFEST_BYTES {
         bail!("tensor manifest exceeds the local size limit");
@@ -156,7 +160,12 @@ pub async fn commit_tensor_file(
         .create_new(true)
         .open(&temporary_manifest)
         .await
-        .with_context(|| format!("creating manifest staging file {}", temporary_manifest.display()))?;
+        .with_context(|| {
+            format!(
+                "creating manifest staging file {}",
+                temporary_manifest.display()
+            )
+        })?;
     if let Err(error) = file.write_all(&encoded).await {
         drop(file);
         let _ = fs::remove_file(&temporary_manifest).await;
@@ -171,12 +180,14 @@ pub async fn commit_tensor_file(
 
     if let Err(error) = fs::rename(partial_path, final_path).await {
         let _ = fs::remove_file(&temporary_manifest).await;
-        return Err(error).with_context(|| format!("committing tensor payload {}", final_path.display()));
+        return Err(error)
+            .with_context(|| format!("committing tensor payload {}", final_path.display()));
     }
     if let Err(error) = fs::rename(&temporary_manifest, &manifest_path).await {
         let _ = fs::remove_file(&temporary_manifest).await;
         let _ = fs::remove_file(final_path).await;
-        return Err(error).with_context(|| format!("publishing tensor manifest {}", manifest_path.display()));
+        return Err(error)
+            .with_context(|| format!("publishing tensor manifest {}", manifest_path.display()));
     }
 
     Ok(manifest)
@@ -239,7 +250,9 @@ pub async fn scan_store(directory: &Path) -> Result<TensorStoreSnapshot> {
     }
 
     snapshot.recent.sort_by(|left, right| {
-        right.stored_at_unix.cmp(&left.stored_at_unix)
+        right
+            .stored_at_unix
+            .cmp(&left.stored_at_unix)
             .then_with(|| left.payload_file.cmp(&right.payload_file))
     });
     snapshot.recent.truncate(MAX_RECENT_TENSORS);
@@ -340,7 +353,10 @@ mod tests {
             "C:outside.tensor",
             "invalid?.tensor",
         ] {
-            assert!(sample_manifest(path, 32).validate().is_err(), "accepted {path}");
+            assert!(
+                sample_manifest(path, 32).validate().is_err(),
+                "accepted {path}"
+            );
         }
     }
 
@@ -372,14 +388,26 @@ mod tests {
 
         let valid = sample_manifest("valid.tensor", 4);
         fs::write(root.join("valid.tensor"), b"data").await.unwrap();
-        fs::write(root.join("valid.json"), serde_json::to_vec(&valid).unwrap()).await.unwrap();
+        fs::write(root.join("valid.json"), serde_json::to_vec(&valid).unwrap())
+            .await
+            .unwrap();
 
         let missing = sample_manifest("missing.tensor", 4);
-        fs::write(root.join("missing.json"), serde_json::to_vec(&missing).unwrap()).await.unwrap();
+        fs::write(
+            root.join("missing.json"),
+            serde_json::to_vec(&missing).unwrap(),
+        )
+        .await
+        .unwrap();
 
         let wrong_length = sample_manifest("short.tensor", 4);
         fs::write(root.join("short.tensor"), b"bad").await.unwrap();
-        fs::write(root.join("short.json"), serde_json::to_vec(&wrong_length).unwrap()).await.unwrap();
+        fs::write(
+            root.join("short.json"),
+            serde_json::to_vec(&wrong_length).unwrap(),
+        )
+        .await
+        .unwrap();
 
         let snapshot = scan_store(&root).await.unwrap();
         assert_eq!(snapshot.count, 1);

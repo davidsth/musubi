@@ -1,8 +1,8 @@
 mod auth;
 mod control;
 mod dashboard;
-mod hardware;
 mod gguf;
+mod hardware;
 mod protocol;
 mod runtime;
 mod storage;
@@ -12,10 +12,11 @@ mod worker;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use control::{ControlMessage, NodeAnnouncement, TensorOfferMessage, TensorOfferReply, CONTROL_VERSION, MAX_CONTROL_DATAGRAM};
+use control::{
+    ControlMessage, NodeAnnouncement, TensorOfferMessage, TensorOfferReply, CONTROL_VERSION,
+    MAX_CONTROL_DATAGRAM,
+};
 use protocol::*;
-use tensor::TensorDescriptor;
-use worker::OfferAdmission;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     io::Write,
@@ -25,7 +26,9 @@ use std::{
     time::{Duration, Instant},
 };
 use sysinfo::System;
+use tensor::TensorDescriptor;
 use tokio::{fs, net::UdpSocket, sync::Mutex, time::timeout};
+use worker::OfferAdmission;
 
 const CHUNK_SIZE: usize = MAX_PAYLOAD;
 const WINDOW_PACKETS: usize = 512;
@@ -34,66 +37,115 @@ const ACK_WAIT: Duration = Duration::from_millis(250);
 const MAX_CLUSTER_NODES: usize = 256;
 
 #[derive(Parser)]
-#[command(name = "aitp", version, about = "Experimental distributed-inference transport")]
-struct Cli { #[command(subcommand)] command: Command }
+#[command(
+    name = "aitp",
+    version,
+    about = "Experimental distributed-inference transport"
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
 
 #[derive(Subcommand)]
 enum Command {
     /// Listen for incoming AITP transfers and write received payloads to a file.
-    Receive { #[arg(long, default_value = "0.0.0.0:9000")] bind: SocketAddr,
-              #[arg(long, default_value = "received.tensor")] output: PathBuf },
+    Receive {
+        #[arg(long, default_value = "0.0.0.0:9000")]
+        bind: SocketAddr,
+        #[arg(long, default_value = "received.tensor")]
+        output: PathBuf,
+    },
     /// Send a file as tensor chunks to an AITP receiver.
-    Send { #[arg(long)] target: SocketAddr, #[arg(long)] input: PathBuf,
-           #[arg(long, default_value_t = 1)] tensor_id: u32 },
+    Send {
+        #[arg(long)]
+        target: SocketAddr,
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long, default_value_t = 1)]
+        tensor_id: u32,
+    },
     /// Submit authenticated tensor metadata to a worker. No tensor bytes are sent.
-    Offer { #[arg(long)] target: SocketAddr, #[arg(long)] descriptor: PathBuf },
+    Offer {
+        #[arg(long)]
+        target: SocketAddr,
+        #[arg(long)]
+        descriptor: PathBuf,
+    },
     /// Offer a tensor and transfer its bytes to an authenticated AITP node.
     SendTensor {
         /// Worker control-plane address (normally UDP port 9001).
-        #[arg(long)] target: SocketAddr,
+        #[arg(long)]
+        target: SocketAddr,
         /// Worker tensor data-plane address (defaults to the same IP on UDP port 9000).
-        #[arg(long)] data_target: Option<SocketAddr>,
-        #[arg(long)] descriptor: PathBuf,
-        #[arg(long)] input: PathBuf,
+        #[arg(long)]
+        data_target: Option<SocketAddr>,
+        #[arg(long)]
+        descriptor: PathBuf,
+        #[arg(long)]
+        input: PathBuf,
     },
     /// Run a LAN node agent with a persistent identity.
-    Node { #[arg(long, default_value = "0.0.0.0:9001")] bind: SocketAddr,
-           #[arg(long, default_value_t = 9000)] data_port: u16,
-           #[arg(long)] name: Option<String>,
-           /// Optional manager control endpoint, for example 192.168.1.10:9002.
-           #[arg(long)] manager: Option<SocketAddr>,
-           #[arg(long, default_value_t = 1000)] heartbeat_ms: u64 },
+    Node {
+        #[arg(long, default_value = "0.0.0.0:9001")]
+        bind: SocketAddr,
+        #[arg(long, default_value_t = 9000)]
+        data_port: u16,
+        #[arg(long)]
+        name: Option<String>,
+        /// Optional manager control endpoint, for example 192.168.1.10:9002.
+        #[arg(long)]
+        manager: Option<SocketAddr>,
+        #[arg(long, default_value_t = 1000)]
+        heartbeat_ms: u64,
+    },
     /// Discover AITP nodes using IPv4 UDP broadcast.
-    Discover { #[arg(long, default_value = "255.255.255.255:9001")] target: SocketAddr,
-               #[arg(long, default_value_t = 1500)] wait_ms: u64 },
+    Discover {
+        #[arg(long, default_value = "255.255.255.255:9001")]
+        target: SocketAddr,
+        #[arg(long, default_value_t = 1500)]
+        wait_ms: u64,
+    },
     /// List catalogued tensor artifacts in the local AITP tensor store.
     Catalog {
-        #[arg(long)] directory: Option<PathBuf>,
+        #[arg(long)]
+        directory: Option<PathBuf>,
         /// Recompute SHA-256 for each displayed payload (slower for large tensors).
-        #[arg(long, default_value_t = false)] verify_hashes: bool,
+        #[arg(long, default_value_t = false)]
+        verify_hashes: bool,
     },
     /// Prepare one committed tensor for a runtime adapter after same-handle SHA-256 verification.
     PrepareTensor {
         /// Path to the tensor's JSON sidecar manifest.
-        #[arg(long)] manifest: PathBuf,
+        #[arg(long)]
+        manifest: PathBuf,
         /// Directory containing the payload (defaults to the manifest's parent directory).
-        #[arg(long)] directory: Option<PathBuf>,
+        #[arg(long)]
+        directory: Option<PathBuf>,
     },
     /// Inspect GGUF model metadata and tensor descriptors without loading model weights.
     InspectGguf {
-        #[arg(long)] input: PathBuf,
+        #[arg(long)]
+        input: PathBuf,
         /// Number of tensor descriptors to print (maximum 128).
-        #[arg(long, default_value_t = 20)] tensor_limit: usize,
+        #[arg(long, default_value_t = 20)]
+        tensor_limit: usize,
     },
     /// List GGUF models in AITP_MODEL_DIR (default: ./aitp-models).
     GgufCatalog {
-        #[arg(long)] directory: Option<PathBuf>,
+        #[arg(long)]
+        directory: Option<PathBuf>,
     },
     /// Run a cluster manager that tracks registrations and node liveness.
-    Manager { #[arg(long, default_value = "0.0.0.0:9002")] bind: SocketAddr,
-              #[arg(long, default_value_t = 5000)] timeout_ms: u64,
-              /// HTTP dashboard bind address. Defaults to localhost for safety.
-              #[arg(long, default_value = "127.0.0.1:9003")] dashboard_bind: SocketAddr },
+    Manager {
+        #[arg(long, default_value = "0.0.0.0:9002")]
+        bind: SocketAddr,
+        #[arg(long, default_value_t = 5000)]
+        timeout_ms: u64,
+        /// HTTP dashboard bind address. Defaults to localhost for safety.
+        #[arg(long, default_value = "127.0.0.1:9003")]
+        dashboard_bind: SocketAddr,
+    },
 }
 
 #[tokio::main]
@@ -101,25 +153,67 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Receive { bind, output } => receive(bind, output).await,
-        Command::Send { target, input, tensor_id } => send(target, input, tensor_id).await,
+        Command::Send {
+            target,
+            input,
+            tensor_id,
+        } => send(target, input, tensor_id).await,
         Command::Offer { target, descriptor } => offer_tensor(target, descriptor).await,
-        Command::SendTensor { target, data_target, descriptor, input } => send_tensor(target, data_target, descriptor, input).await,
-        Command::Node { bind, data_port, name, manager, heartbeat_ms } =>
-            run_node(bind, data_port, name, manager, heartbeat_ms).await,
-        Command::Discover { target, wait_ms } =>
-            discover(target, Duration::from_millis(wait_ms)).await,
-        Command::Catalog { directory, verify_hashes } => catalog_tensors(directory, verify_hashes).await,
-        Command::PrepareTensor { manifest, directory } => prepare_tensor(manifest, directory).await,
-        Command::InspectGguf { input, tensor_limit } => inspect_gguf(input, tensor_limit),
+        Command::SendTensor {
+            target,
+            data_target,
+            descriptor,
+            input,
+        } => send_tensor(target, data_target, descriptor, input).await,
+        Command::Node {
+            bind,
+            data_port,
+            name,
+            manager,
+            heartbeat_ms,
+        } => run_node(bind, data_port, name, manager, heartbeat_ms).await,
+        Command::Discover { target, wait_ms } => {
+            discover(target, Duration::from_millis(wait_ms)).await
+        }
+        Command::Catalog {
+            directory,
+            verify_hashes,
+        } => catalog_tensors(directory, verify_hashes).await,
+        Command::PrepareTensor {
+            manifest,
+            directory,
+        } => prepare_tensor(manifest, directory).await,
+        Command::InspectGguf {
+            input,
+            tensor_limit,
+        } => inspect_gguf(input, tensor_limit),
         Command::GgufCatalog { directory } => catalog_gguf(directory),
-        Command::Manager { bind, timeout_ms, dashboard_bind } =>
-            run_manager(bind, Duration::from_millis(timeout_ms.max(500)), dashboard_bind).await,
+        Command::Manager {
+            bind,
+            timeout_ms,
+            dashboard_bind,
+        } => {
+            run_manager(
+                bind,
+                Duration::from_millis(timeout_ms.max(500)),
+                dashboard_bind,
+            )
+            .await
+        }
     }
 }
 
 fn make_header(kind: u8, message_id: u32, tensor_id: u32, sequence: u32, payload: &[u8]) -> Header {
-    Header { kind, flags: 0, message_id, tensor_id, sequence,
-        payload_len: payload.len() as u16, checksum: checksum(payload), worker_id: 0 }
+    Header {
+        kind,
+        flags: 0,
+        message_id,
+        tensor_id,
+        sequence,
+        payload_len: payload.len() as u16,
+        checksum: checksum(payload),
+        worker_id: 0,
+    }
 }
 
 async fn catalog_tensors(directory: Option<PathBuf>, verify_hashes: bool) -> Result<()> {
@@ -166,7 +260,10 @@ async fn catalog_tensors(directory: Option<PathBuf>, verify_hashes: bool) -> Res
         bail!("{failed_hashes} tensor payload(s) failed SHA-256 verification");
     }
     if verify_hashes {
-        println!("Verified SHA-256 for {} displayed tensor(s).", snapshot.recent.len());
+        println!(
+            "Verified SHA-256 for {} displayed tensor(s).",
+            snapshot.recent.len()
+        );
     }
     Ok(())
 }
@@ -179,7 +276,10 @@ async fn prepare_tensor(manifest_path: PathBuf, directory: Option<PathBuf>) -> R
         || metadata.len() == 0
         || metadata.len() > storage::MAX_MANIFEST_BYTES
     {
-        bail!("manifest must be a non-empty regular file no larger than {} bytes", storage::MAX_MANIFEST_BYTES);
+        bail!(
+            "manifest must be a non-empty regular file no larger than {} bytes",
+            storage::MAX_MANIFEST_BYTES
+        );
     }
 
     let encoded = fs::read(&manifest_path)
@@ -196,10 +296,22 @@ async fn prepare_tensor(manifest_path: PathBuf, directory: Option<PathBuf>) -> R
             .unwrap_or_else(|| PathBuf::from("."))
     });
     let prepared = runtime::open_verified_tensor(&directory, &manifest).await?;
-    println!("Verified tensor '{}' (ID {})", prepared.descriptor().name, prepared.descriptor().tensor_id);
-    println!("Shape: {:?} | dtype: {:?} | encoding: {:?}", prepared.descriptor().shape,
-        prepared.descriptor().dtype, prepared.descriptor().encoding);
-    println!("Payload: {} ({} bytes)", prepared.manifest().payload_file, prepared.byte_len());
+    println!(
+        "Verified tensor '{}' (ID {})",
+        prepared.descriptor().name,
+        prepared.descriptor().tensor_id
+    );
+    println!(
+        "Shape: {:?} | dtype: {:?} | encoding: {:?}",
+        prepared.descriptor().shape,
+        prepared.descriptor().dtype,
+        prepared.descriptor().encoding
+    );
+    println!(
+        "Payload: {} ({} bytes)",
+        prepared.manifest().payload_file,
+        prepared.byte_len()
+    );
     println!("SHA-256: {}", prepared.manifest().sha256);
     println!("A read-only streaming handle is open at byte 0. No bytes were copied into a second buffer or passed to a model runtime.");
     drop(prepared);
@@ -211,22 +323,44 @@ fn inspect_gguf(input: PathBuf, tensor_limit: usize) -> Result<()> {
         bail!("--tensor-limit may not exceed 128");
     }
     let model = gguf::inspect_file(&input)?;
-    println!("GGUF model: {}", model.model_name.as_deref().unwrap_or(&model.filename));
-    println!("File: {} ({:.2} GiB)", model.filename, model.file_bytes as f64 / 1024.0_f64.powi(3));
-    println!("Format: v{} little-endian | alignment {} | data offset {}", model.version, model.alignment, model.data_offset);
-    println!("Architecture: {}", model.architecture.as_deref().unwrap_or("unknown"));
-    println!("Model version: {} | size label: {}",
+    println!(
+        "GGUF model: {}",
+        model.model_name.as_deref().unwrap_or(&model.filename)
+    );
+    println!(
+        "File: {} ({:.2} GiB)",
+        model.filename,
+        model.file_bytes as f64 / 1024.0_f64.powi(3)
+    );
+    println!(
+        "Format: v{} little-endian | alignment {} | data offset {}",
+        model.version, model.alignment, model.data_offset
+    );
+    println!(
+        "Architecture: {}",
+        model.architecture.as_deref().unwrap_or("unknown")
+    );
+    println!(
+        "Model version: {} | size label: {}",
         model.model_version.as_deref().unwrap_or("unknown"),
-        model.model_size_label.as_deref().unwrap_or("unknown"));
-    println!("Layers: {} | context: {} | embedding: {} | feed-forward: {}",
+        model.model_size_label.as_deref().unwrap_or("unknown")
+    );
+    println!(
+        "Layers: {} | context: {} | embedding: {} | feed-forward: {}",
         display_optional(model.layer_count),
         display_optional(model.context_length),
         display_optional(model.embedding_length),
-        display_optional(model.feed_forward_length));
-    println!("Tensors: {} | estimated elements: {} | metadata keys: {}",
-        model.tensor_count, model.estimated_tensor_elements, model.metadata_count);
-    println!("Known tensor bytes: {:.2} GiB | unsupported type layouts: {}",
-        model.known_tensor_bytes as f64 / 1024.0_f64.powi(3), model.unsupported_tensor_count);
+        display_optional(model.feed_forward_length)
+    );
+    println!(
+        "Tensors: {} | estimated elements: {} | metadata keys: {}",
+        model.tensor_count, model.estimated_tensor_elements, model.metadata_count
+    );
+    println!(
+        "Known tensor bytes: {:.2} GiB | unsupported type layouts: {}",
+        model.known_tensor_bytes as f64 / 1024.0_f64.powi(3),
+        model.unsupported_tensor_count
+    );
     if let Some(value) = model.parameter_count_metadata {
         println!("Metadata parameter count: {value}");
     }
@@ -243,16 +377,26 @@ fn inspect_gguf(input: PathBuf, tensor_limit: usize) -> Result<()> {
     }
 
     if tensor_limit > 0 {
-        println!("Tensor descriptors (first {}):", tensor_limit.min(model.tensors.len()));
+        println!(
+            "Tensor descriptors (first {}):",
+            tensor_limit.min(model.tensors.len())
+        );
         for tensor in model.tensors.iter().take(tensor_limit) {
-            let bytes = tensor.byte_len.map(|value| format!("{value} bytes"))
+            let bytes = tensor
+                .byte_len
+                .map(|value| format!("{value} bytes"))
                 .unwrap_or_else(|| "size unsupported by this inspector".into());
-            println!("  {} | {:?} | {} | offset {} | {}",
-                tensor.name, tensor.dimensions, tensor.type_name, tensor.file_offset, bytes);
+            println!(
+                "  {} | {:?} | {} | offset {} | {}",
+                tensor.name, tensor.dimensions, tensor.type_name, tensor.file_offset, bytes
+            );
         }
     }
     if tensor_limit < model.tensors.len() {
-        println!("Showing {tensor_limit} of {} tensor descriptors.", model.tensors.len());
+        println!(
+            "Showing {tensor_limit} of {} tensor descriptors.",
+            model.tensors.len()
+        );
     }
     println!("No tensor payloads were read, allocated, or loaded into an inference runtime.");
     Ok(())
@@ -261,36 +405,54 @@ fn inspect_gguf(input: PathBuf, tensor_limit: usize) -> Result<()> {
 fn catalog_gguf(directory: Option<PathBuf>) -> Result<()> {
     let directory = directory.unwrap_or_else(gguf::configured_model_dir);
     let catalog = gguf::scan_model_dir(&directory)?;
-    println!("AITP GGUF model catalog: {} valid model(s) in {}",
-        catalog.models.len(), directory.display());
-    println!("Scanned {} file(s), skipped {} invalid file(s), omitted {} file(s) above the scan limit.",
-        catalog.scanned_files, catalog.invalid_files, catalog.omitted_files);
+    println!(
+        "AITP GGUF model catalog: {} valid model(s) in {}",
+        catalog.models.len(),
+        directory.display()
+    );
+    println!(
+        "Scanned {} file(s), skipped {} invalid file(s), omitted {} file(s) above the scan limit.",
+        catalog.scanned_files, catalog.invalid_files, catalog.omitted_files
+    );
     for model in &catalog.models {
         let identity = model.model_name.as_deref().unwrap_or(&model.filename);
-        println!("- {} | {} | {} | {:.2} GiB | {} tensors | layers {} | context {}",
+        println!(
+            "- {} | {} | {} | {:.2} GiB | {} tensors | layers {} | context {}",
             identity,
             model.architecture.as_deref().unwrap_or("unknown"),
             model.model_size_label.as_deref().unwrap_or("size unknown"),
             model.file_bytes as f64 / 1024.0_f64.powi(3),
             model.tensor_count,
             display_optional(model.layer_count),
-            display_optional(model.context_length));
+            display_optional(model.context_length)
+        );
     }
     Ok(())
 }
 
 fn display_optional(value: Option<u64>) -> String {
-    value.map(|number| number.to_string()).unwrap_or_else(|| "unknown".into())
+    value
+        .map(|number| number.to_string())
+        .unwrap_or_else(|| "unknown".into())
 }
 
 async fn send(target: SocketAddr, input: PathBuf, tensor_id: u32) -> Result<()> {
-    let data = fs::read(&input).await.with_context(|| format!("reading {}", input.display()))?;
-    if data.is_empty() { bail!("input file is empty"); }
+    let data = fs::read(&input)
+        .await
+        .with_context(|| format!("reading {}", input.display()))?;
+    if data.is_empty() {
+        bail!("input file is empty");
+    }
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     socket.connect(target).await?;
     let message_id = (std::process::id() ^ (data.len() as u32)) | 1;
     let chunks: Vec<&[u8]> = data.chunks(CHUNK_SIZE).collect();
-    println!("AITP: sending {} bytes in {} chunks to {}", data.len(), chunks.len(), target);
+    println!(
+        "AITP: sending {} bytes in {} chunks to {}",
+        data.len(),
+        chunks.len(),
+        target
+    );
 
     let mut acked_total = 0usize;
     for (base, batch) in chunks.chunks(WINDOW_PACKETS).enumerate() {
@@ -308,14 +470,25 @@ async fn send(target: SocketAddr, input: PathBuf, tensor_id: u32) -> Result<()> 
             let deadline = tokio::time::Instant::now() + ACK_WAIT;
             let mut buf = [0u8; 2048];
             while tokio::time::Instant::now() < deadline && acked.iter().any(|v| !v) {
-                match timeout(deadline - tokio::time::Instant::now(), socket.recv(&mut buf)).await {
+                match timeout(
+                    deadline - tokio::time::Instant::now(),
+                    socket.recv(&mut buf),
+                )
+                .await
+                {
                     Ok(Ok(n)) => {
                         if let Ok(h) = Header::decode(&buf[..n]) {
-                            if h.kind == KIND_ACK && h.message_id == message_id && h.tensor_id == tensor_id {
+                            if h.kind == KIND_ACK
+                                && h.message_id == message_id
+                                && h.tensor_id == tensor_id
+                            {
                                 let seq = h.sequence as usize;
                                 if seq >= first_seq && seq < first_seq + batch.len() {
                                     let idx = seq - first_seq;
-                                    if !acked[idx] { acked[idx] = true; acked_total += 1; }
+                                    if !acked[idx] {
+                                        acked[idx] = true;
+                                        acked_total += 1;
+                                    }
                                 }
                             }
                         }
@@ -325,25 +498,45 @@ async fn send(target: SocketAddr, input: PathBuf, tensor_id: u32) -> Result<()> 
                 }
             }
             attempts += 1;
-            if attempts > RETRY_LIMIT { bail!("retry limit exceeded; {acked_total}/{} chunks acknowledged", chunks.len()); }
+            if attempts > RETRY_LIMIT {
+                bail!(
+                    "retry limit exceeded; {acked_total}/{} chunks acknowledged",
+                    chunks.len()
+                );
+            }
         }
         println!("progress: {}/{} chunks", acked_total, chunks.len());
     }
 
-    let fin_payload = [(chunks.len() as u32).to_be_bytes().as_slice(), (data.len() as u64).to_be_bytes().as_slice()].concat();
-    let fin = packet(make_header(KIND_FIN, message_id, tensor_id, chunks.len() as u32, &fin_payload), &fin_payload);
+    let fin_payload = [
+        (chunks.len() as u32).to_be_bytes().as_slice(),
+        (data.len() as u64).to_be_bytes().as_slice(),
+    ]
+    .concat();
+    let fin = packet(
+        make_header(
+            KIND_FIN,
+            message_id,
+            tensor_id,
+            chunks.len() as u32,
+            &fin_payload,
+        ),
+        &fin_payload,
+    );
     let mut buf = [0u8; 2048];
     for _ in 0..RETRY_LIMIT {
         socket.send(&fin).await?;
         if let Ok(Ok(n)) = timeout(Duration::from_secs(1), socket.recv(&mut buf)).await {
             if let Ok(h) = Header::decode(&buf[..n]) {
-                if h.kind == KIND_FIN_ACK && h.message_id == message_id { println!("transfer complete"); return Ok(()); }
+                if h.kind == KIND_FIN_ACK && h.message_id == message_id {
+                    println!("transfer complete");
+                    return Ok(());
+                }
             }
         }
     }
     bail!("receiver did not confirm transfer completion")
 }
-
 
 async fn prepare_tensor_offer(
     target: SocketAddr,
@@ -354,8 +547,8 @@ async fn prepare_tensor_offer(
     let descriptor_bytes = fs::read(&descriptor_path)
         .await
         .with_context(|| format!("reading {}", descriptor_path.display()))?;
-    let descriptor: TensorDescriptor = serde_json::from_slice(&descriptor_bytes)
-        .context("parsing tensor descriptor JSON")?;
+    let descriptor: TensorDescriptor =
+        serde_json::from_slice(&descriptor_bytes).context("parsing tensor descriptor JSON")?;
     descriptor.validate()?;
 
     let sender_node_id = persistent_node_id()?;
@@ -372,12 +565,22 @@ async fn prepare_tensor_offer(
     };
     auth::sign_tensor_offer(&mut offer, &key)?;
 
-    let encoded = serde_json::to_vec(&ControlMessage::TensorOffer { offer: offer.clone() })?;
+    let encoded = serde_json::to_vec(&ControlMessage::TensorOffer {
+        offer: offer.clone(),
+    })?;
     if encoded.len() > MAX_CONTROL_DATAGRAM {
-        bail!("tensor offer is {} bytes; control-plane limit is {}", encoded.len(), MAX_CONTROL_DATAGRAM);
+        bail!(
+            "tensor offer is {} bytes; control-plane limit is {}",
+            encoded.len(),
+            MAX_CONTROL_DATAGRAM
+        );
     }
 
-    let bind = if target.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
+    let bind = if target.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    };
     let socket = UdpSocket::bind(bind).await?;
     socket.send_to(&encoded, target).await?;
     Ok((socket, offer, key))
@@ -424,9 +627,7 @@ async fn offer_tensor(target: SocketAddr, descriptor_path: PathBuf) -> Result<()
     let reply = await_tensor_admission(&socket, target, &offer, &key).await?;
     println!(
         "Worker {} admitted metadata for tensor '{}' ({} bytes).",
-        reply.receiver_node_id,
-        offer.descriptor.name,
-        offer.descriptor.byte_len
+        reply.receiver_node_id, offer.descriptor.name, offer.descriptor.byte_len
     );
     println!("No tensor bytes were sent; use send-tensor to complete the authenticated transfer.");
     Ok(())
@@ -459,39 +660,67 @@ async fn receive(bind: SocketAddr, output: PathBuf) -> Result<()> {
 
     loop {
         let (n, peer) = socket.recv_from(&mut buf).await?;
-        let h = match Header::decode(&buf[..n]) { Ok(h) => h, Err(_) => continue };
-        if HEADER_LEN + h.payload_len as usize != n { continue; }
+        let h = match Header::decode(&buf[..n]) {
+            Ok(h) => h,
+            Err(_) => continue,
+        };
+        if HEADER_LEN + h.payload_len as usize != n {
+            continue;
+        }
         let payload = &buf[HEADER_LEN..n];
-        if checksum(payload) != h.checksum { continue; }
+        if checksum(payload) != h.checksum {
+            continue;
+        }
 
         if h.kind == KIND_DATA {
-            let needs_new = active.as_ref().map(|a| a.0 != h.message_id || a.1 != h.tensor_id || a.2 != peer).unwrap_or(true);
+            let needs_new = active
+                .as_ref()
+                .map(|a| a.0 != h.message_id || a.1 != h.tensor_id || a.2 != peer)
+                .unwrap_or(true);
             if needs_new {
                 let file = fs::File::create(&output).await?;
                 active = Some((h.message_id, h.tensor_id, peer, file, HashSet::new()));
-                println!("receiving message {} tensor {} from {}", h.message_id, h.tensor_id, peer);
+                println!(
+                    "receiving message {} tensor {} from {}",
+                    h.message_id, h.tensor_id, peer
+                );
             }
             if let Some((msg, tensor, addr, file, received)) = active.as_mut() {
                 if *msg == h.message_id && *tensor == h.tensor_id && *addr == peer {
                     use tokio::io::{AsyncSeekExt, AsyncWriteExt};
                     if !received.contains(&h.sequence) {
-                        file.seek(std::io::SeekFrom::Start(h.sequence as u64 * CHUNK_SIZE as u64)).await?;
+                        file.seek(std::io::SeekFrom::Start(
+                            h.sequence as u64 * CHUNK_SIZE as u64,
+                        ))
+                        .await?;
                         file.write_all(payload).await?;
                         received.insert(h.sequence);
                     }
-                    let ack = packet(make_header(KIND_ACK, h.message_id, h.tensor_id, h.sequence, &[]), &[]);
+                    let ack = packet(
+                        make_header(KIND_ACK, h.message_id, h.tensor_id, h.sequence, &[]),
+                        &[],
+                    );
                     socket.send_to(&ack, peer).await?;
                 }
             }
         } else if h.kind == KIND_FIN {
-            if payload.len() != 12 { continue; }
+            if payload.len() != 12 {
+                continue;
+            }
             let total_chunks = u32::from_be_bytes(payload[0..4].try_into()?);
             let total_bytes = u64::from_be_bytes(payload[4..12].try_into()?);
             if let Some((msg, tensor, addr, file, received)) = active.as_mut() {
-                if *msg == h.message_id && *tensor == h.tensor_id && *addr == peer && received.len() == total_chunks as usize {
+                if *msg == h.message_id
+                    && *tensor == h.tensor_id
+                    && *addr == peer
+                    && received.len() == total_chunks as usize
+                {
                     file.set_len(total_bytes).await?;
                     file.sync_all().await?;
-                    let ack = packet(make_header(KIND_FIN_ACK, h.message_id, h.tensor_id, total_chunks, &[]), &[]);
+                    let ack = packet(
+                        make_header(KIND_FIN_ACK, h.message_id, h.tensor_id, total_chunks, &[]),
+                        &[],
+                    );
                     socket.send_to(&ack, peer).await?;
                     println!("saved {} bytes to {}", total_bytes, output.display());
                     active = None;
@@ -506,8 +735,13 @@ fn aitp_state_dir() -> Result<PathBuf> {
         std::env::var_os("APPDATA").map(PathBuf::from)
     } else {
         std::env::var_os("HOME").map(PathBuf::from)
-    }.unwrap_or(std::env::current_dir()?);
-    let dir = if cfg!(windows) { base.join("aitp") } else { base.join(".aitp") };
+    }
+    .unwrap_or(std::env::current_dir()?);
+    let dir = if cfg!(windows) {
+        base.join("aitp")
+    } else {
+        base.join(".aitp")
+    };
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
 }
@@ -534,12 +768,16 @@ fn persistent_node_id() -> Result<String> {
 fn next_offer_sequence() -> Result<u64> {
     let path = aitp_state_dir()?.join("offer-sequence");
     let previous = match std::fs::read_to_string(&path) {
-        Ok(value) => value.trim().parse::<u64>()
+        Ok(value) => value
+            .trim()
+            .parse::<u64>()
             .context("parsing persisted tensor-offer sequence")?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
         Err(error) => return Err(error.into()),
     };
-    let next = previous.checked_add(1).context("tensor-offer sequence exhausted")?;
+    let next = previous
+        .checked_add(1)
+        .context("tensor-offer sequence exhausted")?;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(true)
@@ -571,18 +809,27 @@ async fn run_node(
             .with_context(|| format!("binding authenticated tensor data port {data_bind}"))?;
         let admission_state = offer_admission.clone();
         tokio::spawn(async move {
-            if let Err(error) = tensor_transfer::run_receiver(data_socket, key, admission_state).await {
+            if let Err(error) =
+                tensor_transfer::run_receiver(data_socket, key, admission_state).await
+            {
                 eprintln!("AITP authenticated tensor receiver stopped: {error:#}");
             }
         });
     }
     let hostname = name.unwrap_or_else(local_hostname);
-    let logical_cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let logical_cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
     let mut system = System::new_all();
     system.refresh_memory();
     let total_memory_bytes = system.total_memory();
     let available_memory_bytes = system.available_memory();
-    let cpu_model = system.cpus().first().map(|cpu| cpu.brand().trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| "Unknown CPU".into());
+    let cpu_model = system
+        .cpus()
+        .first()
+        .map(|cpu| cpu.brand().trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "Unknown CPU".into());
     let accelerators = hardware::detect_accelerators();
     let announcement = NodeAnnouncement {
         version: CONTROL_VERSION,
@@ -599,7 +846,12 @@ async fn run_node(
         inference_port: data_port,
     };
 
-    println!("AITP node '{}' [{}] listening on {}", hostname, node_id, socket.local_addr()?);
+    println!(
+        "AITP node '{}' [{}] listening on {}",
+        hostname,
+        node_id,
+        socket.local_addr()?
+    );
     println!(
         "Persistent identity stored locally; {} logical CPUs, {:.1} GiB total RAM, {:.1} GiB available RAM.",
         logical_cpus,
@@ -607,8 +859,17 @@ async fn run_node(
         available_memory_bytes as f64 / 1024.0_f64.powi(3)
     );
     println!("CPU: {}", cpu_model);
-    for gpu in &accelerators { println!("Accelerator: {} ({}, {})", gpu.name, gpu.vendor, hardware::memory_label(gpu)); }
-    if accelerators.is_empty() { println!("No GPU probe found. Apple Silicon GPU shares unified system memory."); }
+    for gpu in &accelerators {
+        println!(
+            "Accelerator: {} ({}, {})",
+            gpu.name,
+            gpu.vendor,
+            hardware::memory_label(gpu)
+        );
+    }
+    if accelerators.is_empty() {
+        println!("No GPU probe found. Apple Silicon GPU shares unified system memory.");
+    }
     if cluster_key.is_some() {
         println!("Authenticated tensor offers and bounded tensor reception are enabled.");
     } else {
@@ -617,7 +878,9 @@ async fn run_node(
     println!("No remote command execution is supported.");
 
     if let Some(manager_addr) = manager {
-        let registration = serde_json::to_vec(&ControlMessage::Register { node: announcement.clone() })?;
+        let registration = serde_json::to_vec(&ControlMessage::Register {
+            node: announcement.clone(),
+        })?;
         socket.send_to(&registration, manager_addr).await?;
         println!("Registered with cluster manager at {}", manager_addr);
     }
@@ -647,7 +910,7 @@ async fn run_node(
             }
             _ = offer_reap.tick() => {
                 offer_admission.lock().await.expire(Instant::now());
-                
+
             }
             received = socket.recv_from(&mut buf) => {
                 let (n, peer) = received?;
@@ -710,7 +973,11 @@ struct ManagedNode {
     last_sequence: u64,
 }
 
-async fn run_manager(bind: SocketAddr, offline_after: Duration, dashboard_bind: SocketAddr) -> Result<()> {
+async fn run_manager(
+    bind: SocketAddr,
+    offline_after: Duration,
+    dashboard_bind: SocketAddr,
+) -> Result<()> {
     let socket = UdpSocket::bind(bind).await?;
     let dashboard_snapshot = dashboard::shared_snapshot();
     let dashboard_state = dashboard_snapshot.clone();
@@ -720,7 +987,10 @@ async fn run_manager(bind: SocketAddr, offline_after: Duration, dashboard_bind: 
         }
     });
     println!("AITP cluster manager listening on {}", socket.local_addr()?);
-    println!("Nodes are marked OFFLINE after {} ms without a heartbeat.", offline_after.as_millis());
+    println!(
+        "Nodes are marked OFFLINE after {} ms without a heartbeat.",
+        offline_after.as_millis()
+    );
     println!("Dashboard is read-only and defaults to localhost; use --dashboard-bind to expose it on a trusted LAN.");
 
     let mut nodes: HashMap<String, ManagedNode> = HashMap::new();
@@ -824,13 +1094,22 @@ async fn run_manager(bind: SocketAddr, offline_after: Duration, dashboard_bind: 
 }
 
 async fn discover(target: SocketAddr, wait: Duration) -> Result<()> {
-    if !target.is_ipv4() { bail!("this discovery implementation currently requires an IPv4 broadcast target"); }
+    if !target.is_ipv4() {
+        bail!("this discovery implementation currently requires an IPv4 broadcast target");
+    }
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     socket.set_broadcast(true)?;
     let nonce = uuid::Uuid::new_v4().to_string();
-    let query = serde_json::to_vec(&ControlMessage::Discover { version: CONTROL_VERSION, nonce: nonce.clone() })?;
+    let query = serde_json::to_vec(&ControlMessage::Discover {
+        version: CONTROL_VERSION,
+        nonce: nonce.clone(),
+    })?;
     socket.send_to(&query, target).await?;
-    println!("Searching for AITP nodes via {} for {} ms...", target, wait.as_millis());
+    println!(
+        "Searching for AITP nodes via {} for {} ms...",
+        target,
+        wait.as_millis()
+    );
 
     let deadline = tokio::time::Instant::now() + wait;
     let mut nodes = BTreeMap::<String, NodeAnnouncement>::new();
@@ -839,9 +1118,15 @@ async fn discover(target: SocketAddr, wait: Duration) -> Result<()> {
         let remaining = deadline - tokio::time::Instant::now();
         match timeout(remaining, socket.recv_from(&mut buf)).await {
             Ok(Ok((n, _peer))) => {
-                if n == 0 || n > MAX_CONTROL_DATAGRAM { continue; }
-                let Ok(ControlMessage::Announce(node)) = serde_json::from_slice(&buf[..n]) else { continue };
-                if node.version != CONTROL_VERSION || node.nonce != nonce { continue; }
+                if n == 0 || n > MAX_CONTROL_DATAGRAM {
+                    continue;
+                }
+                let Ok(ControlMessage::Announce(node)) = serde_json::from_slice(&buf[..n]) else {
+                    continue;
+                };
+                if node.version != CONTROL_VERSION || node.nonce != nonce {
+                    continue;
+                }
                 nodes.entry(node.node_id.clone()).or_insert(node);
             }
             Ok(Err(e)) => return Err(e.into()),
@@ -850,7 +1135,9 @@ async fn discover(target: SocketAddr, wait: Duration) -> Result<()> {
     }
 
     if nodes.is_empty() {
-        println!("No AITP nodes found. Check that node agents are running and UDP broadcast is allowed.");
+        println!(
+            "No AITP nodes found. Check that node agents are running and UDP broadcast is allowed."
+        );
     } else {
         println!("Found {} node(s):", nodes.len());
         for node in nodes.values() {
@@ -858,13 +1145,21 @@ async fn discover(target: SocketAddr, wait: Duration) -> Result<()> {
                 node.hostname, node.node_id, node.os, node.arch, node.cpu_model, node.logical_cpus,
                 node.available_memory_bytes as f64 / 1024.0_f64.powi(3),
                 node.total_memory_bytes as f64 / 1024.0_f64.powi(3), node.inference_port);
-            for gpu in &node.accelerators { println!("    GPU: {} ({}, {})", gpu.name, gpu.vendor, hardware::memory_label(gpu)); }
+            for gpu in &node.accelerators {
+                println!(
+                    "    GPU: {} ({}, {})",
+                    gpu.name,
+                    gpu.vendor,
+                    hardware::memory_label(gpu)
+                );
+            }
         }
     }
     Ok(())
 }
 
 fn local_hostname() -> String {
-    std::env::var("HOSTNAME").or_else(|_| std::env::var("COMPUTERNAME"))
+    std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
         .unwrap_or_else(|_| "aitp-node".to_string())
 }

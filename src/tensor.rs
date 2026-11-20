@@ -13,7 +13,13 @@ pub const MAX_TENSOR_BYTES: u64 = 1_u64 << 40; // 1 TiB safety ceiling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TensorDType {
-    F32, F16, BF16, I8, U8, I32, I64,
+    F32,
+    F16,
+    BF16,
+    I8,
+    U8,
+    I32,
+    I64,
 }
 
 impl TensorDType {
@@ -86,7 +92,8 @@ impl TensorDescriptor {
         }
 
         let elements = self.shape.iter().try_fold(1_u64, |total, dimension| {
-            total.checked_mul(*dimension)
+            total
+                .checked_mul(*dimension)
                 .ok_or_else(|| anyhow::anyhow!("tensor element count overflow"))
         })?;
 
@@ -95,7 +102,8 @@ impl TensorDescriptor {
                 if self.layout == TensorLayout::Ggml {
                     bail!("GGML layout requires a GGML block encoding");
                 }
-                elements.checked_mul(self.dtype.byte_width())
+                elements
+                    .checked_mul(self.dtype.byte_width())
                     .ok_or_else(|| anyhow::anyhow!("tensor byte length overflow"))?
             }
             Some((block_elements, block_bytes)) => {
@@ -110,10 +118,12 @@ impl TensorDescriptor {
                     bail!("GGML innermost dimension must be divisible by {block_elements}");
                 }
                 let outer_rows = self.shape[1..].iter().try_fold(1_u64, |total, dimension| {
-                    total.checked_mul(*dimension)
+                    total
+                        .checked_mul(*dimension)
                         .ok_or_else(|| anyhow::anyhow!("tensor row count overflow"))
                 })?;
-                (inner / block_elements).checked_mul(block_bytes)
+                (inner / block_elements)
+                    .checked_mul(block_bytes)
                     .and_then(|row_bytes| row_bytes.checked_mul(outer_rows))
                     .ok_or_else(|| anyhow::anyhow!("quantized tensor byte length overflow"))?
             }
@@ -132,7 +142,10 @@ impl TensorDescriptor {
         }
         let expected = self.expected_byte_len()?;
         if self.byte_len != expected {
-            bail!("descriptor byte_len {} does not match expected size {expected}", self.byte_len);
+            bail!(
+                "descriptor byte_len {} does not match expected size {expected}",
+                self.byte_len
+            );
         }
         Ok(())
     }
@@ -142,7 +155,12 @@ impl TensorDescriptor {
 mod tests {
     use super::*;
 
-    fn descriptor(encoding: TensorEncoding, layout: TensorLayout, shape: Vec<u64>, byte_len: u64) -> TensorDescriptor {
+    fn descriptor(
+        encoding: TensorEncoding,
+        layout: TensorLayout,
+        shape: Vec<u64>,
+        byte_len: u64,
+    ) -> TensorDescriptor {
         TensorDescriptor {
             tensor_id: 7,
             name: "hidden_states".into(),
@@ -156,14 +174,24 @@ mod tests {
 
     #[test]
     fn raw_f16_descriptor_calculates_exact_size() {
-        let value = descriptor(TensorEncoding::Raw, TensorLayout::RowMajor, vec![2, 4, 8], 128);
+        let value = descriptor(
+            TensorEncoding::Raw,
+            TensorLayout::RowMajor,
+            vec![2, 4, 8],
+            128,
+        );
         assert_eq!(value.expected_byte_len().unwrap(), 128);
         assert!(value.validate().is_ok());
     }
 
     #[test]
     fn ggml_q4_0_uses_block_storage_size() {
-        let mut value = descriptor(TensorEncoding::GgmlQ4_0, TensorLayout::Ggml, vec![64, 2], 72);
+        let mut value = descriptor(
+            TensorEncoding::GgmlQ4_0,
+            TensorLayout::Ggml,
+            vec![64, 2],
+            72,
+        );
         value.dtype = TensorDType::F32;
         assert_eq!(value.expected_byte_len().unwrap(), 72);
         assert!(value.validate().is_ok());
@@ -174,7 +202,12 @@ mod tests {
         let value = descriptor(TensorEncoding::Raw, TensorLayout::RowMajor, vec![4, 4], 31);
         assert!(value.validate().is_err());
 
-        let mut quantized = descriptor(TensorEncoding::GgmlQ4_0, TensorLayout::Ggml, vec![33, 2], 38);
+        let mut quantized = descriptor(
+            TensorEncoding::GgmlQ4_0,
+            TensorLayout::Ggml,
+            vec![33, 2],
+            38,
+        );
         quantized.dtype = TensorDType::F32;
         assert!(quantized.validate().is_err());
     }
@@ -184,13 +217,23 @@ mod tests {
         let zero = descriptor(TensorEncoding::Raw, TensorLayout::RowMajor, vec![0, 4], 0);
         assert!(zero.validate().is_err());
 
-        let overflow = descriptor(TensorEncoding::Raw, TensorLayout::RowMajor, vec![u64::MAX, 8], 1);
+        let overflow = descriptor(
+            TensorEncoding::Raw,
+            TensorLayout::RowMajor,
+            vec![u64::MAX, 8],
+            1,
+        );
         assert!(overflow.validate().is_err());
     }
 
     #[test]
     fn rejects_incompatible_layout_and_dtype() {
-        let mut wrong_layout = descriptor(TensorEncoding::GgmlQ4_0, TensorLayout::RowMajor, vec![32], 18);
+        let mut wrong_layout = descriptor(
+            TensorEncoding::GgmlQ4_0,
+            TensorLayout::RowMajor,
+            vec![32],
+            18,
+        );
         wrong_layout.dtype = TensorDType::F32;
         assert!(wrong_layout.validate().is_err());
 

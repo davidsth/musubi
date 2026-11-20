@@ -9,11 +9,20 @@ pub const MAX_CONTROL_DATAGRAM: usize = 1024;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlMessage {
-    Discover { version: u8, nonce: String },
+    Discover {
+        version: u8,
+        nonce: String,
+    },
     Announce(NodeAnnouncement),
-    Register { node: NodeAnnouncement },
-    TensorOffer { offer: TensorOfferMessage },
-    TensorOfferReply { reply: TensorOfferReply },
+    Register {
+        node: NodeAnnouncement,
+    },
+    TensorOffer {
+        offer: TensorOfferMessage,
+    },
+    TensorOfferReply {
+        reply: TensorOfferReply,
+    },
     Heartbeat {
         version: u8,
         node_id: String,
@@ -85,9 +94,10 @@ impl NodeAnnouncement {
             && !self.cpu_model.is_empty()
             && self.cpu_model.len() <= 256
             && self.accelerators.len() <= 8
-            && self.accelerators.iter().all(|gpu| {
-                !gpu.name.is_empty() && gpu.name.len() <= 256 && gpu.vendor.len() <= 64
-            })
+            && self
+                .accelerators
+                .iter()
+                .all(|gpu| !gpu.name.is_empty() && gpu.name.len() <= 256 && gpu.vendor.len() <= 64)
             && self.total_memory_bytes <= (1_u64 << 60)
             && self.available_memory_bytes <= self.total_memory_bytes
             && self.inference_port != 0
