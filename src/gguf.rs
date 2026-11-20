@@ -845,16 +845,16 @@ mod tests {
     #[test]
     fn reports_unknown_tensor_types_without_guessing_their_sizes() {
         let mut bytes = fixture();
-        // Replace the first tensor type ID with a future/unknown value.
+        let name = b"blk.0.attn_q.weight";
+        let position = bytes.windows(name.len()).position(|window| window == name).unwrap();
+        let type_pos = position + name.len() + 4 + 8 + 8;
+        bytes[type_pos..type_pos + 4].copy_from_slice(&999u32.to_le_bytes());
+
         let mut cursor = Cursor::new(bytes.clone());
-        let parsed = parse_reader(&mut cursor, bytes.len() as u64, "tiny.gguf".into()).unwrap();
-        let type_offset = parsed.tensors[0].file_offset; // not the descriptor field; locate from fixture below.
-        let _ = type_offset;
-        // Keep this test focused on the public type table behavior.
-        let (name, layout) = ggml_type_info(999);
-        assert_eq!(name, "unknown(999)");
-        assert_eq!(layout, None);
-        bytes.clear();
+        let model = parse_reader(&mut cursor, bytes.len() as u64, "tiny.gguf".into()).unwrap();
+        assert_eq!(model.tensors[0].type_name, "unknown(999)");
+        assert_eq!(model.tensors[0].byte_len, None);
+        assert_eq!(model.unsupported_tensor_count, 1);
     }
 
     #[test]
@@ -868,7 +868,7 @@ mod tests {
         // The alignment metadata value is after its type tag; find the encoded key.
         let key = b"general.alignment";
         let position = invalid.windows(key.len()).position(|window| window == key).unwrap();
-        let value_pos = position + 8 + key.len() + 4;
+        let value_pos = position + key.len() + 4;
         invalid[value_pos..value_pos + 4].copy_from_slice(&7u32.to_le_bytes());
         let mut cursor = Cursor::new(invalid.clone());
         assert!(parse_reader(&mut cursor, invalid.len() as u64, "bad-alignment.gguf".into()).is_err());
@@ -879,7 +879,7 @@ mod tests {
         let mut bytes = fixture();
         let name = b"output.weight";
         let position = bytes.windows(name.len()).position(|window| window == name).unwrap();
-        let offset_pos = position + 8 + name.len() + 4 + 8 + 8 + 4;
+        let offset_pos = position + name.len() + 4 + 8 + 8 + 4;
         bytes[offset_pos..offset_pos + 8].copy_from_slice(&32u64.to_le_bytes());
         let mut cursor = Cursor::new(bytes.clone());
         assert!(parse_reader(&mut cursor, bytes.len() as u64, "overlap.gguf".into()).is_err());
