@@ -226,7 +226,7 @@ async fn run_receiver_in(
                         continue;
                     }
 
-                    let mut finished = active.take().expect("active transfer checked above");
+                    let finished = active.take().expect("active transfer checked above");
                     finished.file.set_len(declared_bytes).await?;
                     finished.file.sync_all().await?;
                     drop(finished.file);
