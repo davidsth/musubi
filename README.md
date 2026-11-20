@@ -154,6 +154,24 @@ Validate one artifact from the command line:
 
 Use `--directory /path/to/aitp-tensors` when the sidecar and payload are stored separately. The command reads only a bounded JSON sidecar, verifies the corresponding payload, and prints its descriptor and digest. It does not load the tensor into a model, allocate a tensor-sized buffer, or execute any remote workload. The API is the handoff point for a future llama.cpp adapter; model/runtime compatibility and layer execution are not implemented yet.
 
+## GGUF model inspection and local model catalog v0.11
+
+AITP includes a bounded, read-only GGUF v2/v3 inspector. It reads the header, selected architecture metadata, and tensor descriptor table; it seeks over tokenizer arrays and tensor payload bytes instead of loading model weights. Tensor dimensions are preserved in GGML order (dimension zero is the innermost axis).
+
+Inspect one model:
+
+    cargo run --release -- inspect-gguf --input /path/to/model.gguf --tensor-limit 20
+
+List models in the local catalog:
+
+    cargo run --release -- gguf-catalog
+
+Set `AITP_MODEL_DIR` to choose the model directory (default: `./aitp-models/`). The cluster dashboard scans up to 16 top-level `.gguf` files in this directory every 30 seconds and displays model name, architecture, file size, layer/context/embedding metadata, tensor count, parameter estimate, and the observed tensor-type mix. This is a local inventory on the dashboard host; model files are not copied to workers.
+
+The initial inspector accepts little-endian GGUF v2/v3. It calculates storage sizes for a defined subset of GGML types (F32/F16, Q4/Q5/Q8, K-quants, IQ types, integer types, and BF16). Unknown/newer tensor type IDs are reported without guessing their byte sizes. Big-endian GGUF is not supported. The reported parameter estimate is the sum of tensor element counts; it is not a model-quality or runtime-memory estimate.
+
+**This is metadata inspection only.** AITP still does not load GGUF weights, map tensors into a llama.cpp context, partition layers, or execute inference.
+
 ## Cluster dashboard v0.7
 
 The manager serves a responsive, read-only web dashboard over HTTP. The dashboard is intentionally separate from the UDP tensor data plane and reads a snapshot of the manager's in-memory node inventory. It does not issue commands to nodes, allocate workloads, or execute code. The default bind is localhost; LAN exposure requires an explicit bind-address override. The dashboard currently has no authentication or TLS, so keep it on localhost or a trusted isolated LAN.
@@ -172,6 +190,7 @@ The v0.9 dashboard also shows valid tensor manifests found in the dashboard host
 - The manager does not authenticate node IDs; a device on the LAN can attempt to register a claimed ID.
 - Heartbeat liveness is based on sequence-numbered messages and a configurable timeout, not cryptographic identity.
 - The authenticated tensor receiver stages completed payloads to disk and publishes a SHA-256 manifest. v0.10 adds a verified streaming file handle for runtime adapters, but there is not yet a tensor allocator, mmap-backed adapter, model loader, or inference execution path. Verification occurs when the handle is opened; keep the local tensor store trusted and do not modify a payload while a runtime is consuming its open handle. The dashboard's artifact catalog is local to the manager host and does not aggregate remote worker stores.
+- The GGUF v0.11 inspector reads bounded model metadata and tensor descriptors only. It is not a GGUF loader; unsupported tensor type sizes are left unknown, and big-endian GGUF is rejected.
 - No inference-runtime integration, GPU-direct networking, RDMA, or zero-copy path.
 - Hardware inventory includes CPU model, OS, architecture, logical CPU count, total RAM, periodically refreshed available RAM, and best-effort accelerator names/vendors/memory. NVIDIA VRAM is reported when nvidia-smi is installed. Apple Silicon is represented as an integrated GPU sharing unified system memory. Some platform probes identify devices without reliable VRAM data. Compute capability, utilization, and measured throughput are not yet reported.
 
@@ -185,11 +204,13 @@ The v0.9 dashboard also shows valid tensor manifests found in the dashboard host
 6. Bind accepted offers to an authenticated, bounded tensor receive path without changing the 32-byte data-plane header. (Initial disk-staging transfer path and loopback integration test added in v0.8.)
 7. Publish durable tensor manifests and provide a local artifact catalog with explicit SHA-256 verification. (Added in v0.9.)
 8. Add a verified streaming runtime handoff from a manifest to an open payload reader. (Added in v0.10.)
-9. Integrate one inference backend (llama.cpp on CPU first), then execute a remote layer on a worker.
-10. Implement pipeline partitioning: place contiguous transformer layer ranges on workers, transfer activations, and stream generated tokens.
-11. Add automatic memory-aware placement, then GPU/Metal/CUDA acceleration and performance tuning.
-12. Add control-plane authentication, congestion control, and benchmarking.
-13. Add a cluster dashboard for live node inventory. (Initial read-only dashboard added in v0.7; local tensor catalog added in v0.9.)
+9. Inspect GGUF model metadata and tensor tables, and surface a local model catalog in the dashboard. (Added in v0.11; metadata inspection only.)
+10. Add a verified, file-backed GGUF tensor reader/loader for supported types and validate tensor mapping against llama.cpp.
+11. Integrate llama.cpp on CPU first and execute a remote layer on a worker.
+12. Implement pipeline partitioning: place contiguous transformer layer ranges on workers, transfer activations, and stream generated tokens.
+13. Add automatic memory-aware placement, then GPU/Metal/CUDA acceleration and performance tuning.
+14. Add control-plane authentication, congestion control, and benchmarking.
+15. Add a cluster dashboard for live node inventory. (Initial read-only dashboard added in v0.7; local tensor catalog added in v0.9; local GGUF catalog added in v0.11.)
 
 ## Security
 
