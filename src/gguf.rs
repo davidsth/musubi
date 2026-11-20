@@ -9,7 +9,7 @@ use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, HashSet},
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::{BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
