@@ -219,7 +219,7 @@ pub async fn scan_store(directory: &Path) -> Result<TensorStoreSnapshot> {
             Ok(encoded) => encoded,
             Err(_) => continue,
         };
-        let manifest: TensorManifest = match serde_json::from_slice(&encoded) {
+        let manifest: TensorManifest = match serde_json::from_slice::<TensorManifest>(&encoded) {
             Ok(manifest) if manifest.validate().is_ok() => manifest,
             _ => continue,
         };
