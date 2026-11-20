@@ -21,9 +21,9 @@ pub const MAX_METADATA_ENTRIES: u64 = 65_536;
 pub const MAX_TENSORS: u64 = 262_144;
 pub const MAX_TENSOR_DIMS: u32 = 8;
 pub const MAX_TENSOR_NAME_BYTES: u64 = 64;
-pub const MAX_METADATA_KEY_BYTES: u64 = 65_535;
+pub const MAX_METADATA_KEY_BYTES: u64 = 1024;
 pub const MAX_SELECTED_STRING_BYTES: u64 = 4096;
-pub const MAX_ARRAY_ELEMENTS_TO_SKIP: u64 = 4_000_000;
+pub const MAX_ARRAY_ELEMENTS_TO_SKIP: u64 = 2_000_000;
 pub const MAX_ARRAY_DEPTH: u32 = 8;
 pub const MAX_MODELS_TO_SCAN: usize = 16;
 
@@ -360,7 +360,11 @@ pub fn parse_reader<R: Read + Seek>(
     }
 
     let descriptor_end = reader.stream_position()?;
-    let data_offset = align_up(descriptor_end, u64::from(alignment))?;
+    let data_offset = if tensor_count == 0 {
+        descriptor_end
+    } else {
+        align_up(descriptor_end, u64::from(alignment))?
+    };
     if data_offset > file_len {
         bail!("GGUF tensor-data offset is beyond the end of the file");
     }
@@ -855,6 +859,21 @@ mod tests {
         assert_eq!(model.tensors[0].type_name, "unknown(999)");
         assert_eq!(model.tensors[0].byte_len, None);
         assert_eq!(model.unsupported_tensor_count, 1);
+    }
+
+    #[test]
+    fn accepts_metadata_only_gguf_without_alignment_padding() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"GGUF");
+        put_u32(&mut bytes, 3);
+        put_u64(&mut bytes, 0);
+        put_u64(&mut bytes, 2);
+        put_string_metadata(&mut bytes, "general.architecture", "llama");
+        put_u32_metadata(&mut bytes, "general.alignment", 32);
+        let mut cursor = Cursor::new(bytes.clone());
+        let model = parse_reader(&mut cursor, bytes.len() as u64, "vocab.gguf".into()).unwrap();
+        assert_eq!(model.tensor_count, 0);
+        assert_eq!(model.data_offset, bytes.len() as u64);
     }
 
     #[test]
