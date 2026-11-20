@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.11.0 — GGUF metadata inspector and dashboard model catalog
+
+- Added a bounded little-endian GGUF v2/v3 reader for headers, selected architecture metadata, and tensor descriptors.
+- Skips tokenizer arrays and tensor payload data without allocating model-sized buffers.
+- Calculates storage sizes for a documented subset of GGML tensor formats and reports unknown/newer types without guessing.
+- Validates file bounds, metadata/tensor count limits, dimensions, alignment, duplicate names, known tensor ranges, and overlapping known-size tensors.
+- Added `inspect-gguf` and `gguf-catalog` CLI commands.
+- Added a local `AITP_MODEL_DIR` scanner (16 top-level files per scan) and model cards in the read-only dashboard, refreshed every 30 seconds.
+- Added synthetic GGUF fixtures for metadata, tokenizer string arrays, supported/unknown types, metadata-only files, truncation, invalid alignment, and overlapping ranges.
+- No GGUF weights are loaded; no model allocator, llama.cpp adapter, workload scheduler, or remote execution was added. The 32-byte tensor data-plane header remains unchanged.
+
 ## v0.10.0 — Verified streaming runtime handoff
 
 - Added a read-only runtime handoff API that validates a tensor manifest and opens its payload as a streaming reader.
