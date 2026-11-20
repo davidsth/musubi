@@ -778,14 +778,15 @@ async fn run_manager(bind: SocketAddr, offline_after: Duration, dashboard_bind: 
                         storage::TensorStoreSnapshot::default()
                     }
                 };
-                *dashboard_snapshot.write().await = dashboard::ClusterSnapshot {
-                    nodes: snapshot_nodes,
-                    online_nodes,
-                    offline_nodes: nodes.len().saturating_sub(online_nodes),
-                    tensor_store,
-                    updated_at_unix: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
-                };
+                {
+                    let mut snapshot = dashboard_snapshot.write().await;
+                    snapshot.nodes = snapshot_nodes;
+                    snapshot.online_nodes = online_nodes;
+                    snapshot.offline_nodes = nodes.len().saturating_sub(online_nodes);
+                    snapshot.tensor_store = tensor_store;
+                    snapshot.updated_at_unix = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                }
             }
             received = socket.recv_from(&mut buf) => {
                 let (n, peer) = received?;
