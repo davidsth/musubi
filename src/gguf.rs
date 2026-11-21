@@ -7,6 +7,7 @@
 
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
+use crate::tensor::{TensorDType, TensorDescriptor, TensorEncoding, TensorLayout};
 use std::{
     collections::{BTreeMap, HashSet},
     fs::{self, OpenOptions},
@@ -40,6 +41,24 @@ pub struct GgufTensorInfo {
     pub file_offset: u64,
     /// None means this reader does not yet know the type's block layout.
     pub byte_len: Option<u64>,
+}
+
+/// A GGUF tensor backed by a range of the original model file.
+///
+/// The file handle is the same handle used to parse and validate the GGUF
+/// tensor table, so callers do not need to reopen an untrusted path.
+#[derive(Debug)]
+pub struct GgufTensorSource {
+    file: std::fs::File,
+    pub descriptor: TensorDescriptor,
+    pub file_offset: u64,
+}
+
+impl GgufTensorSource {
+    /// Return the original model file, tensor descriptor, and absolute byte offset.
+    pub fn into_parts(self) -> (std::fs::File, TensorDescriptor, u64) {
+        (self.file, self.descriptor, self.file_offset)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -139,7 +158,7 @@ pub fn configured_model_dir() -> PathBuf {
 }
 
 /// Inspect a GGUF file without reading its tensor payloads into memory.
-pub fn inspect_file(path: &Path) -> Result<GgufModelSummary> {
+fn open_gguf_file(path: &Path) -> Result<std::fs::File> {
     let path_metadata = fs::symlink_metadata(path)
         .with_context(|| format!("inspecting GGUF path {}", path.display()))?;
     if !path_metadata.file_type().is_file() {
@@ -179,14 +198,94 @@ pub fn inspect_file(path: &Path) -> Result<GgufModelSummary> {
         }
     }
 
+    Ok(file)
+}
+
+/// Inspect a GGUF file without reading its tensor payloads into memory.
+pub fn inspect_file(path: &Path) -> Result<GgufModelSummary> {
+    let file = open_gguf_file(path)?;
+    let file_len = file.metadata()?.len();
     let filename = path
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or("model.gguf")
         .to_owned();
-    let file_len = metadata.len();
     let mut reader = BufReader::new(file);
     parse_reader(&mut reader, file_len, filename)
+}
+
+/// Open one supported tensor as a byte range of its original GGUF file.
+///
+/// Parsing and range validation happen on the same open file handle returned
+/// to the caller. Unknown GGML encodings are rejected rather than assigned an
+/// estimated byte length.
+pub fn open_tensor_source(
+    path: &Path,
+    tensor_name: &str,
+    tensor_id: u32,
+) -> Result<GgufTensorSource> {
+    let file = open_gguf_file(path)?;
+    let file_len = file.metadata()?.len();
+    let filename = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("model.gguf")
+        .to_owned();
+    let mut reader = BufReader::new(file);
+    let model = parse_reader(&mut reader, file_len, filename)?;
+
+    let tensor = model
+        .tensors
+        .iter()
+        .find(|tensor| tensor.name == tensor_name)
+        .with_context(|| format!("GGUF tensor '{tensor_name}' was not found"))?;
+
+    let (dtype, encoding) = descriptor_encoding(tensor.ggml_type_id)
+        .with_context(|| format!("GGML tensor type '{}' is not supported by AITP transfer", tensor.type_name))?;
+    let byte_len = tensor
+        .byte_len
+        .with_context(|| format!("GGUF tensor '{}' has no verified storage size", tensor.name))?;
+    let range_end = tensor
+        .file_offset
+        .checked_add(byte_len)
+        .context("GGUF tensor source range overflow")?;
+    if range_end > file_len {
+        bail!("GGUF tensor source range extends beyond the opened model file");
+    }
+
+    let descriptor = TensorDescriptor {
+        tensor_id,
+        name: tensor.name.clone(),
+        dtype,
+        shape: tensor.dimensions.clone(),
+        layout: TensorLayout::Ggml,
+        encoding,
+        byte_len,
+    };
+    descriptor.validate().context("validating GGUF tensor descriptor")?;
+
+    Ok(GgufTensorSource {
+        file: reader.into_inner(),
+        descriptor,
+        file_offset: tensor.file_offset,
+    })
+}
+
+fn descriptor_encoding(type_id: u32) -> Option<(TensorDType, TensorEncoding)> {
+    match type_id {
+        0 => Some((TensorDType::F32, TensorEncoding::Raw)),
+        1 => Some((TensorDType::F16, TensorEncoding::Raw)),
+        2 => Some((TensorDType::F32, TensorEncoding::GgmlQ4_0)),
+        3 => Some((TensorDType::F32, TensorEncoding::GgmlQ4_1)),
+        6 => Some((TensorDType::F32, TensorEncoding::GgmlQ5_0)),
+        7 => Some((TensorDType::F32, TensorEncoding::GgmlQ5_1)),
+        8 => Some((TensorDType::F32, TensorEncoding::GgmlQ8_0)),
+        24 => Some((TensorDType::I8, TensorEncoding::Raw)),
+        26 => Some((TensorDType::I32, TensorEncoding::Raw)),
+        27 => Some((TensorDType::I64, TensorEncoding::Raw)),
+        30 => Some((TensorDType::BF16, TensorEncoding::Raw)),
+        _ => None,
+    }
 }
 
 /// Scan only the top-level .gguf files in a model directory. At most sixteen
@@ -1005,4 +1104,60 @@ mod tests {
         let mut cursor = Cursor::new(excessive.clone());
         assert!(parse_reader(&mut cursor, excessive.len() as u64, "count.gguf".into()).is_err());
     }
+    #[test]
+    fn opens_raw_gguf_tensor_from_the_original_file_range() {
+        let bytes = fixture();
+        let path = std::env::temp_dir().join(format!("aitp-gguf-range-{}.gguf", uuid::Uuid::new_v4()));
+        std::fs::write(&path, &bytes).unwrap();
+
+        let source = open_tensor_source(&path, "output.weight", 77).unwrap();
+        let (mut file, descriptor, offset) = source.into_parts();
+        assert_eq!(descriptor.tensor_id, 77);
+        assert_eq!(descriptor.dtype, TensorDType::F16);
+        assert_eq!(descriptor.layout, TensorLayout::Ggml);
+        assert_eq!(descriptor.encoding, TensorEncoding::Raw);
+        assert_eq!(descriptor.shape, vec![2, 2]);
+        assert_eq!(descriptor.byte_len, 8);
+
+        file.seek(SeekFrom::Start(offset)).unwrap();
+        let mut actual = vec![0u8; descriptor.byte_len as usize];
+        file.read_exact(&mut actual).unwrap();
+        let expected = &bytes[offset as usize..(offset + descriptor.byte_len) as usize];
+        assert_eq!(actual, expected);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn maps_supported_quantized_tensor_to_aitp_descriptor() {
+        let bytes = fixture();
+        let path = std::env::temp_dir().join(format!("aitp-gguf-q4-{}.gguf", uuid::Uuid::new_v4()));
+        std::fs::write(&path, &bytes).unwrap();
+
+        let source = open_tensor_source(&path, "blk.0.attn_q.weight", 78).unwrap();
+        let (_, descriptor, _) = source.into_parts();
+        assert_eq!(descriptor.dtype, TensorDType::F32);
+        assert_eq!(descriptor.encoding, TensorEncoding::GgmlQ4_0);
+        assert_eq!(descriptor.layout, TensorLayout::Ggml);
+        assert_eq!(descriptor.shape, vec![32, 2]);
+        assert_eq!(descriptor.byte_len, 36);
+        assert!(descriptor.validate().is_ok());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn refuses_gguf_tensor_types_without_an_exact_aitp_encoding() {
+        let mut bytes = fixture();
+        let name = b"blk.0.attn_q.weight";
+        let position = bytes.windows(name.len()).position(|window| window == name).unwrap();
+        let type_pos = position + name.len() + 4 + 8 + 8;
+        bytes[type_pos..type_pos + 4].copy_from_slice(&999u32.to_le_bytes());
+        let path = std::env::temp_dir().join(format!("aitp-gguf-unsupported-{}.gguf", uuid::Uuid::new_v4()));
+        std::fs::write(&path, &bytes).unwrap();
+
+        let error = open_tensor_source(&path, "blk.0.attn_q.weight", 79).unwrap_err();
+        assert!(error.to_string().contains("not supported by AITP transfer"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+
 }
