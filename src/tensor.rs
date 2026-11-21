@@ -98,14 +98,11 @@ impl TensorDescriptor {
         })?;
 
         let bytes = match self.encoding.ggml_block() {
-            None => {
-                if self.layout == TensorLayout::Ggml {
-                    bail!("GGML layout requires a GGML block encoding");
-                }
-                elements
-                    .checked_mul(self.dtype.byte_width())
-                    .ok_or_else(|| anyhow::anyhow!("tensor byte length overflow"))?
-            }
+            // Raw GGUF tensors still use GGML's dimension ordering. Layout
+            // does not change the number of bytes in an unquantized tensor.
+            None => elements
+                .checked_mul(self.dtype.byte_width())
+                .ok_or_else(|| anyhow::anyhow!("tensor byte length overflow"))?,
             Some((block_elements, block_bytes)) => {
                 if self.layout != TensorLayout::Ggml {
                     bail!("GGML block encoding requires GGML layout");
@@ -224,6 +221,18 @@ mod tests {
             1,
         );
         assert!(overflow.validate().is_err());
+    }
+
+    #[test]
+    fn raw_gguf_tensor_accepts_ggml_dimension_order() {
+        let value = descriptor(
+            TensorEncoding::Raw,
+            TensorLayout::Ggml,
+            vec![2, 3],
+            12,
+        );
+        assert_eq!(value.expected_byte_len().unwrap(), 12);
+        assert!(value.validate().is_ok());
     }
 
     #[test]
