@@ -172,6 +172,22 @@ The initial inspector accepts little-endian GGUF v2/v3. It calculates storage si
 
 **This is metadata inspection only.** AITP still does not load GGUF weights, map tensors into a llama.cpp context, partition layers, or execute inference.
 
+
+### Direct GGUF tensor transfer v0.12
+
+Send one supported tensor from a GGUF file directly to a node without first extracting it to a separate temporary tensor file:
+
+    export AITP_CLUSTER_KEY="same-32-byte-or-longer-secret-used-by-worker"
+    cargo run --release -- send-gguf-tensor \
+      --target 192.168.1.50:9001 \
+      --model ./aitp-models/model.gguf \
+      --tensor-name blk.0.attn_q.weight \
+      --tensor-id 17
+
+The command parses and validates the GGUF tensor table from a securely opened model file, constructs a typed descriptor for the selected tensor, obtains authenticated worker admission, then streams only that tensor's byte range from the same open file handle. It does not load the complete model or create an extracted copy. The existing 32-byte packet header and authenticated chunk format are unchanged.
+
+The initial transfer mapping is intentionally limited to F32, F16, BF16, I8, I32, I64, Q4_0, Q4_1, Q5_0, Q5_1, and Q8_0. Other known GGML formats (including K-quants and IQ formats) are rejected for transfer until their AITP descriptor encodings are added; the inspector can still report their known sizes. The existing worker limit of 1 GiB per tensor still applies. This sends a single tensor artifact, not a complete model and not an executable model layer.
+
 ## Cluster dashboard v0.7
 
 The manager serves a responsive, read-only web dashboard over HTTP. The dashboard is intentionally separate from the UDP tensor data plane and reads a snapshot of the manager's in-memory node inventory. It does not issue commands to nodes, allocate workloads, or execute code. The default bind is localhost; LAN exposure requires an explicit bind-address override. The dashboard currently has no authentication or TLS, so keep it on localhost or a trusted isolated LAN.
