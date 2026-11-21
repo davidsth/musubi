@@ -85,6 +85,24 @@ enum Command {
         #[arg(long)]
         input: PathBuf,
     },
+    /// Stream one supported tensor directly from a GGUF model file to a worker.
+    SendGgufTensor {
+        /// Worker control-plane address (normally UDP port 9001).
+        #[arg(long)]
+        target: SocketAddr,
+        /// Worker tensor data-plane address (defaults to the same IP on UDP port 9000).
+        #[arg(long)]
+        data_target: Option<SocketAddr>,
+        /// Source GGUF model file.
+        #[arg(long)]
+        model: PathBuf,
+        /// Exact tensor name from the GGUF tensor table.
+        #[arg(long)]
+        tensor_name: String,
+        /// AITP tensor ID for this transfer.
+        #[arg(long, default_value_t = 1)]
+        tensor_id: u32,
+    },
     /// Run a LAN node agent with a persistent identity.
     Node {
         #[arg(long, default_value = "0.0.0.0:9001")]
@@ -165,6 +183,13 @@ async fn main() -> Result<()> {
             descriptor,
             input,
         } => send_tensor(target, data_target, descriptor, input).await,
+        Command::SendGgufTensor {
+            target,
+            data_target,
+            model,
+            tensor_name,
+            tensor_id,
+        } => send_gguf_tensor(target, data_target, model, tensor_name, tensor_id).await,
         Command::Node {
             bind,
             data_port,
@@ -549,8 +574,15 @@ async fn prepare_tensor_offer(
         .with_context(|| format!("reading {}", descriptor_path.display()))?;
     let descriptor: TensorDescriptor =
         serde_json::from_slice(&descriptor_bytes).context("parsing tensor descriptor JSON")?;
-    descriptor.validate()?;
+    prepare_tensor_offer_with_descriptor(target, descriptor, key).await
+}
 
+async fn prepare_tensor_offer_with_descriptor(
+    target: SocketAddr,
+    descriptor: TensorDescriptor,
+    key: Vec<u8>,
+) -> Result<(UdpSocket, TensorOfferMessage, Vec<u8>)> {
+    descriptor.validate()?;
     let sender_node_id = persistent_node_id()?;
     let sequence = next_offer_sequence()?;
     let random_id = uuid::Uuid::new_v4();
@@ -650,6 +682,63 @@ async fn send_tensor(
         reply.receiver_node_id, offer.descriptor.name
     );
     tensor_transfer::send_tensor_data(&socket, data_target, &input, &offer, &key).await
+}
+
+async fn send_gguf_tensor(
+    target: SocketAddr,
+    data_target: Option<SocketAddr>,
+    model_path: PathBuf,
+    tensor_name: String,
+    tensor_id: u32,
+) -> Result<()> {
+    let data_target = data_target.unwrap_or_else(|| SocketAddr::new(target.ip(), 9000));
+    if data_target.ip() != target.ip() {
+        bail!("control and data targets must use the same worker IP so the admitted UDP peer stays bound to this transfer");
+    }
+
+    let source_path = model_path.clone();
+    let source_name = tensor_name.clone();
+    let source = tokio::task::spawn_blocking(move || {
+        gguf::open_tensor_source(&source_path, &source_name, tensor_id)
+    })
+    .await
+    .context("joining GGUF tensor source inspection task")??;
+    let (source_file, descriptor, source_offset) = source.into_parts();
+
+    if descriptor.byte_len > worker::DEFAULT_MAX_OFFER_BYTES {
+        bail!(
+            "GGUF tensor '{}' is {} bytes; the current worker limit is {} bytes",
+            descriptor.name,
+            descriptor.byte_len,
+            worker::DEFAULT_MAX_OFFER_BYTES
+        );
+    }
+
+    let key = auth::cluster_key_from_env()?
+        .context("set AITP_CLUSTER_KEY to the same 32+ byte secret used by the worker")?;
+    let (socket, offer, key) =
+        prepare_tensor_offer_with_descriptor(target, descriptor, key).await?;
+    let reply = await_tensor_admission(&socket, target, &offer, &key).await?;
+
+    println!(
+        "Worker {} admitted GGUF tensor '{}'; streaming {} bytes from {} at offset {} without extracting a copy.",
+        reply.receiver_node_id,
+        offer.descriptor.name,
+        offer.descriptor.byte_len,
+        model_path.display(),
+        source_offset
+    );
+    let mut source_file = fs::File::from_std(source_file);
+    tensor_transfer::send_tensor_range(
+        &socket,
+        data_target,
+        &mut source_file,
+        source_offset,
+        offer.descriptor.byte_len,
+        &offer,
+        &key,
+    )
+    .await
 }
 
 async fn receive(bind: SocketAddr, output: PathBuf) -> Result<()> {
