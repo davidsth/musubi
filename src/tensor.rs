@@ -38,7 +38,7 @@ impl TensorDType {
 pub enum TensorLayout {
     RowMajor,
     ColumnMajor,
-    /// GGML quantized storage: dimension zero is the innermost block axis.
+    /// GGML storage order: dimension zero is the innermost/contiguous axis.
     Ggml,
 }
 
