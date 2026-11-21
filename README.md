@@ -221,12 +221,13 @@ The v0.9 dashboard also shows valid tensor manifests found in the dashboard host
 7. Publish durable tensor manifests and provide a local artifact catalog with explicit SHA-256 verification. (Added in v0.9.)
 8. Add a verified streaming runtime handoff from a manifest to an open payload reader. (Added in v0.10.)
 9. Inspect GGUF model metadata and tensor tables, and surface a local model catalog in the dashboard. (Added in v0.11; metadata inspection only.)
-10. Add a verified, file-backed GGUF tensor reader/loader for supported types and validate tensor mapping against llama.cpp.
-11. Integrate llama.cpp on CPU first and execute a remote layer on a worker.
-12. Implement pipeline partitioning: place contiguous transformer layer ranges on workers, transfer activations, and stream generated tokens.
-13. Add automatic memory-aware placement, then GPU/Metal/CUDA acceleration and performance tuning.
-14. Add control-plane authentication, congestion control, and benchmarking.
-15. Add a cluster dashboard for live node inventory. (Initial read-only dashboard added in v0.7; local tensor catalog added in v0.9; local GGUF catalog added in v0.11.)
+10. Stream validated GGUF tensor byte ranges from the original model file to workers for the initial supported type subset. (File-backed range transfer added in v0.12; llama.cpp mapping remains to be validated.)
+11. Add exact GGML storage/stride coverage for common K-quants and IQ formats, then validate tensor mapping against llama.cpp.
+12. Integrate llama.cpp on CPU first and execute a remote layer on a worker.
+13. Implement pipeline partitioning: place contiguous transformer layer ranges on workers, transfer activations, and stream generated tokens.
+14. Add automatic memory-aware placement, then GPU/Metal/CUDA acceleration and performance tuning.
+15. Add control-plane authentication, congestion control, and benchmarking.
+16. Add a cluster dashboard for live node inventory. (Initial read-only dashboard added in v0.7; local tensor catalog added in v0.9; local GGUF catalog added in v0.11.)
 
 ## Security
 
