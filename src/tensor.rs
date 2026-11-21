@@ -225,12 +225,7 @@ mod tests {
 
     #[test]
     fn raw_gguf_tensor_accepts_ggml_dimension_order() {
-        let value = descriptor(
-            TensorEncoding::Raw,
-            TensorLayout::Ggml,
-            vec![2, 3],
-            12,
-        );
+        let value = descriptor(TensorEncoding::Raw, TensorLayout::Ggml, vec![2, 3], 12);
         assert_eq!(value.expected_byte_len().unwrap(), 12);
         assert!(value.validate().is_ok());
     }
