@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.12.0 — Direct GGUF tensor range transfer
+
+- Added a secure GGUF tensor-source API that parses and validates metadata on the same opened file handle returned for streaming.
+- Added exact AITP descriptor mappings for F32/F16/BF16/I8/I32/I64 and Q4_0/Q4_1/Q5_0/Q5_1/Q8_0 tensor formats; unsupported encodings fail closed.
+- Added `send-gguf-tensor` to authenticate a worker tensor offer and stream only the selected tensor's validated byte range directly from the original GGUF file.
+- Generalized the authenticated sender with a bounded file-range API; ordinary `send-tensor` remains supported.
+- Kept the 32-byte binary packet header, authenticated payload framing, worker admission, and 1 GiB per-tensor ceiling unchanged.
+- Added tests for raw GGUF range reading, quantized descriptor mapping, unsupported format rejection, and multi-chunk ranged loopback transfer.
+- No complete-model loading, tensor extraction copy, llama.cpp execution, layer scheduling, or arbitrary remote execution added.
+
 ## v0.11.0 — GGUF metadata inspector and dashboard model catalog
 
 - Added a bounded little-endian GGUF v2/v3 reader for headers, selected architecture metadata, and tensor descriptors.
