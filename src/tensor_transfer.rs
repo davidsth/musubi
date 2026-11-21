@@ -280,6 +280,7 @@ async fn run_receiver_in(
 
 /// Send the file bytes for an already-admitted tensor offer using the same UDP socket
 /// that submitted the offer. This keeps the observed source endpoint bound to admission.
+/// Send a complete tensor file through the authenticated data plane.
 pub async fn send_tensor_data(
     socket: &UdpSocket,
     data_target: SocketAddr,
@@ -287,17 +288,40 @@ pub async fn send_tensor_data(
     offer: &TensorOfferMessage,
     key: &[u8],
 ) -> Result<()> {
-    offer.descriptor.validate()?;
-    let byte_len = offer.descriptor.byte_len;
-    if byte_len > MAX_WORKER_TENSOR_BYTES {
-        bail!("tensor exceeds the current 1 GiB transfer ceiling");
-    }
     let mut file = fs::File::open(input)
         .await
         .with_context(|| format!("opening tensor file {}", input.display()))?;
-    let actual_len = file.metadata().await?.len();
-    if actual_len != byte_len {
-        bail!("input file is {actual_len} bytes but descriptor expects {byte_len}");
+    let byte_len = file.metadata().await?.len();
+    send_tensor_range(socket, data_target, &mut file, 0, byte_len, offer, key).await
+}
+
+/// Send a bounded byte range from an already-open file.
+///
+/// This lets a GGUF tensor be streamed straight from its validated model-file
+/// offset without extracting it to another file or loading the model into RAM.
+pub async fn send_tensor_range(
+    socket: &UdpSocket,
+    data_target: SocketAddr,
+    file: &mut fs::File,
+    range_offset: u64,
+    byte_len: u64,
+    offer: &TensorOfferMessage,
+    key: &[u8],
+) -> Result<()> {
+    offer.descriptor.validate()?;
+    if byte_len != offer.descriptor.byte_len {
+        bail!("source range is {byte_len} bytes but tensor descriptor expects {}",
+            offer.descriptor.byte_len);
+    }
+    if byte_len > MAX_WORKER_TENSOR_BYTES {
+        bail!("tensor exceeds the current 1 GiB transfer ceiling");
+    }
+    let file_len = file.metadata().await?.len();
+    let range_end = range_offset
+        .checked_add(byte_len)
+        .context("tensor source range end overflow")?;
+    if range_end > file_len {
+        bail!("tensor source range ends beyond the opened file");
     }
 
     let total_chunks = chunk_count(byte_len)?;
@@ -314,7 +338,10 @@ pub async fn send_tensor_data(
         for sequence in first_sequence..batch_end {
             let payload_len = expected_chunk_len(byte_len, sequence)?;
             let offset = u64::from(sequence) * MAX_AUTH_PAYLOAD as u64;
-            file.seek(std::io::SeekFrom::Start(offset)).await?;
+            let source_offset = range_offset
+                .checked_add(offset)
+                .context("tensor source range offset overflow")?;
+            file.seek(std::io::SeekFrom::Start(source_offset)).await?;
             let mut payload = vec![0u8; payload_len];
             file.read_exact(&mut payload).await?;
             let header = Header {
