@@ -640,7 +640,12 @@ mod tests {
             .map(|index| (index % 251) as u8)
             .collect();
         let input = root.join("input.bin");
-        fs::write(&input, &data).await.unwrap();
+        let prefix = vec![0xa5; 37];
+        let suffix = vec![0x5a; 19];
+        let mut source_bytes = prefix.clone();
+        source_bytes.extend_from_slice(&data);
+        source_bytes.extend_from_slice(&suffix);
+        fs::write(&input, &source_bytes).await.unwrap();
 
         let receiver_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let receiver_addr = receiver_socket.local_addr().unwrap();
@@ -681,7 +686,19 @@ mod tests {
 
         let transfer_result = timeout(
             Duration::from_secs(10),
-            send_tensor_data(&sender_socket, receiver_addr, &input, &offer, &key),
+            async {
+                let mut source = fs::File::open(&input).await.unwrap();
+                send_tensor_range(
+                    &sender_socket,
+                    receiver_addr,
+                    &mut source,
+                    prefix.len() as u64,
+                    data.len() as u64,
+                    &offer,
+                    &key,
+                )
+                .await
+            },
         )
         .await;
         if !matches!(transfer_result, Ok(Ok(()))) {
