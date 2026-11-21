@@ -5,9 +5,9 @@
 //! The initial reader supports little-endian GGUF v2/v3 and reports byte sizes
 //! only for GGML tensor types whose block layouts are known here.
 
+use crate::tensor::{TensorDType, TensorDescriptor, TensorEncoding, TensorLayout};
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
-use crate::tensor::{TensorDType, TensorDescriptor, TensorEncoding, TensorLayout};
 use std::{
     collections::{BTreeMap, HashSet},
     fs::{self, OpenOptions},
@@ -240,8 +240,12 @@ pub fn open_tensor_source(
         .find(|tensor| tensor.name == tensor_name)
         .with_context(|| format!("GGUF tensor '{tensor_name}' was not found"))?;
 
-    let (dtype, encoding) = descriptor_encoding(tensor.ggml_type_id)
-        .with_context(|| format!("GGML tensor type '{}' is not supported by AITP transfer", tensor.type_name))?;
+    let (dtype, encoding) = descriptor_encoding(tensor.ggml_type_id).with_context(|| {
+        format!(
+            "GGML tensor type '{}' is not supported by AITP transfer",
+            tensor.type_name
+        )
+    })?;
     let byte_len = tensor
         .byte_len
         .with_context(|| format!("GGUF tensor '{}' has no verified storage size", tensor.name))?;
@@ -262,7 +266,9 @@ pub fn open_tensor_source(
         encoding,
         byte_len,
     };
-    descriptor.validate().context("validating GGUF tensor descriptor")?;
+    descriptor
+        .validate()
+        .context("validating GGUF tensor descriptor")?;
 
     Ok(GgufTensorSource {
         file: reader.into_inner(),
@@ -1107,7 +1113,8 @@ mod tests {
     #[test]
     fn opens_raw_gguf_tensor_from_the_original_file_range() {
         let bytes = fixture();
-        let path = std::env::temp_dir().join(format!("aitp-gguf-range-{}.gguf", uuid::Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("aitp-gguf-range-{}.gguf", uuid::Uuid::new_v4()));
         std::fs::write(&path, &bytes).unwrap();
 
         let source = open_tensor_source(&path, "output.weight", 77).unwrap();
@@ -1148,16 +1155,20 @@ mod tests {
     fn refuses_gguf_tensor_types_without_an_exact_aitp_encoding() {
         let mut bytes = fixture();
         let name = b"blk.0.attn_q.weight";
-        let position = bytes.windows(name.len()).position(|window| window == name).unwrap();
+        let position = bytes
+            .windows(name.len())
+            .position(|window| window == name)
+            .unwrap();
         let type_pos = position + name.len() + 4 + 8 + 8;
         bytes[type_pos..type_pos + 4].copy_from_slice(&999u32.to_le_bytes());
-        let path = std::env::temp_dir().join(format!("aitp-gguf-unsupported-{}.gguf", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!(
+            "aitp-gguf-unsupported-{}.gguf",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::write(&path, &bytes).unwrap();
 
         let error = open_tensor_source(&path, "blk.0.attn_q.weight", 79).unwrap_err();
         assert!(error.to_string().contains("not supported by AITP transfer"));
         std::fs::remove_file(path).unwrap();
     }
-
-
 }

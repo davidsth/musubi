@@ -310,8 +310,10 @@ pub async fn send_tensor_range(
 ) -> Result<()> {
     offer.descriptor.validate()?;
     if byte_len != offer.descriptor.byte_len {
-        bail!("source range is {byte_len} bytes but tensor descriptor expects {}",
-            offer.descriptor.byte_len);
+        bail!(
+            "source range is {byte_len} bytes but tensor descriptor expects {}",
+            offer.descriptor.byte_len
+        );
     }
     if byte_len > MAX_WORKER_TENSOR_BYTES {
         bail!("tensor exceeds the current 1 GiB transfer ceiling");
@@ -684,22 +686,19 @@ mod tests {
             output_dir.clone(),
         ));
 
-        let transfer_result = timeout(
-            Duration::from_secs(10),
-            async {
-                let mut source = fs::File::open(&input).await.unwrap();
-                send_tensor_range(
-                    &sender_socket,
-                    receiver_addr,
-                    &mut source,
-                    prefix.len() as u64,
-                    data.len() as u64,
-                    &offer,
-                    &key,
-                )
-                .await
-            },
-        )
+        let transfer_result = timeout(Duration::from_secs(10), async {
+            let mut source = fs::File::open(&input).await.unwrap();
+            send_tensor_range(
+                &sender_socket,
+                receiver_addr,
+                &mut source,
+                prefix.len() as u64,
+                data.len() as u64,
+                &offer,
+                &key,
+            )
+            .await
+        })
         .await;
         if !matches!(transfer_result, Ok(Ok(()))) {
             receiver.abort();
