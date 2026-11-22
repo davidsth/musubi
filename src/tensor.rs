@@ -309,7 +309,10 @@ mod tests {
             );
             value.dtype = TensorDType::F32;
             assert_eq!(value.expected_byte_len().unwrap(), value.byte_len);
-            assert!(value.validate().is_ok(), "invalid descriptor for {encoding:?}");
+            assert!(
+                value.validate().is_ok(),
+                "invalid descriptor for {encoding:?}"
+            );
 
             let encoded = serde_json::to_vec(&value).unwrap();
             let decoded: TensorDescriptor = serde_json::from_slice(&encoded).unwrap();
@@ -331,5 +334,4 @@ mod tests {
             assert!(value.validate().is_ok());
         }
     }
-
 }
