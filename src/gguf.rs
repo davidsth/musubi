@@ -642,11 +642,17 @@ pub fn parse_reader<R: Read + Seek>(
                     .checked_add(byte_len)
                     .context("GGUF tensor end offset overflow")?;
                 if absolute_end > file_len {
-                    bail!("GGUF tensor '{}' extends beyond the file length", tensor.name);
+                    bail!(
+                        "GGUF tensor '{}' extends beyond the file length",
+                        tensor.name
+                    );
                 }
             }
             None if absolute_start >= file_len => {
-                bail!("GGUF tensor '{}' offset is beyond the tensor data", tensor.name);
+                bail!(
+                    "GGUF tensor '{}' offset is beyond the tensor data",
+                    tensor.name
+                );
             }
             None => {}
         }
