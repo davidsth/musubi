@@ -3,7 +3,7 @@
 use crate::tensor::TensorDescriptor;
 use serde::{Deserialize, Serialize};
 
-pub const CONTROL_VERSION: u8 = 5;
+pub const CONTROL_VERSION: u8 = 6;
 pub const MAX_CONTROL_DATAGRAM: usize = 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

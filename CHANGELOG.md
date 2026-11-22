@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.13.0 — Expanded GGML quantized tensor transfer descriptors
+
+- Added exact AITP block encodings for Q8_1, Q2_K through Q8_K, and IQ1/IQ2/IQ3/IQ4 variants, including IQ1_M.
+- Added raw I16 and F64 descriptor widths and GGUF type-ID mappings.
+- Added cross-coverage tests that open synthetic GGUF files, validate supported type descriptors and exact byte lengths, and read selected source ranges back byte-for-byte.
+- Bumped the control-plane schema to version 6 for the expanded descriptor variants and the package to 0.13.0.
+- Preserved the 32-byte binary data-plane header, authenticated range streaming, bounded transfer path, and fail-closed behavior for unverified types.
+- No dequantization, arbitrary strided views, llama.cpp layer execution, workload scheduler, or remote code execution added.
+
 ## v0.12.0 — Direct GGUF tensor range transfer
 
 - Added a secure GGUF tensor-source API that parses and validates metadata on the same opened file handle returned for streaming.

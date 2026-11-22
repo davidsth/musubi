@@ -173,7 +173,7 @@ The initial inspector accepts little-endian GGUF v2/v3. It calculates storage si
 **This is metadata inspection only.** AITP still does not load GGUF weights, map tensors into a llama.cpp context, partition layers, or execute inference.
 
 
-### Direct GGUF tensor transfer v0.12
+### Direct GGUF tensor transfer v0.13
 
 Send one supported tensor from a GGUF file directly to a node without first extracting it to a separate temporary tensor file:
 
@@ -186,7 +186,7 @@ Send one supported tensor from a GGUF file directly to a node without first extr
 
 The command parses and validates the GGUF tensor table from a securely opened model file, constructs a typed descriptor for the selected tensor, obtains authenticated worker admission, then streams only that tensor's byte range from the same open file handle. It does not load the complete model or create an extracted copy. The existing 32-byte packet header and authenticated chunk format are unchanged.
 
-The initial transfer mapping is intentionally limited to F32, F16, BF16, I8, I32, I64, Q4_0, Q4_1, Q5_0, Q5_1, and Q8_0. Other known GGML formats (including K-quants and IQ formats) are rejected for transfer until their AITP descriptor encodings are added; the inspector can still report their known sizes. The existing worker limit of 1 GiB per tensor still applies. This sends a single tensor artifact, not a complete model and not an executable model layer.
+The v0.13 transfer mapping covers raw F32/F16/BF16/I8/I16/I32/I64/F64 plus Q4_0/Q4_1/Q5_0/Q5_1/Q8_0/Q8_1, Q2_K through Q8_K, and IQ1/IQ2/IQ3/IQ4 variants (IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_NL, and IQ4_XS). Block sizes and type IDs are cross-checked against llama.cpp ggml-common.h; descriptors preserve the opaque encoding and GGML dimension order (dimension zero is the innermost block axis), and validate exact per-row storage sizes with checked arithmetic. Q8_1 and Q8_K are included for format completeness and commonly support intermediate quantization/dot-product paths rather than ordinary model weights. TQ1_0, TQ2_0, MXFP4, and other unverified/newer encodings still fail closed. This metadata mapping does not dequantize bytes or prove that a tensor is executable by a particular runtime. The control-plane schema is version 6 so older workers reject the expanded descriptor encoding set rather than misinterpreting it. The existing worker limit of 1 GiB per tensor still applies. This sends a single tensor artifact, not a complete model and not an executable model layer.
 
 ## Cluster dashboard v0.7
 
@@ -207,6 +207,7 @@ The v0.9 dashboard also shows valid tensor manifests found in the dashboard host
 - Heartbeat liveness is based on sequence-numbered messages and a configurable timeout, not cryptographic identity.
 - The authenticated tensor receiver stages completed payloads to disk and publishes a SHA-256 manifest. v0.10 adds a verified streaming file handle for runtime adapters, but there is not yet a tensor allocator, mmap-backed adapter, model loader, or inference execution path. Verification occurs when the handle is opened; keep the local tensor store trusted and do not modify a payload while a runtime is consuming its open handle. The dashboard's artifact catalog is local to the manager host and does not aggregate remote worker stores.
 - The GGUF v0.11 inspector reads bounded model metadata and tensor descriptors only. It is not a GGUF loader; unsupported tensor type sizes are left unknown, and big-endian GGUF is rejected.
+- GGUF transfer descriptors currently describe contiguous GGML tensor storage only; arbitrary tensor views/strides, dequantization, and runtime operation compatibility are not implemented.
 - No inference-runtime integration, GPU-direct networking, RDMA, or zero-copy path.
 - Hardware inventory includes CPU model, OS, architecture, logical CPU count, total RAM, periodically refreshed available RAM, and best-effort accelerator names/vendors/memory. NVIDIA VRAM is reported when nvidia-smi is installed. Apple Silicon is represented as an integrated GPU sharing unified system memory. Some platform probes identify devices without reliable VRAM data. Compute capability, utilization, and measured throughput are not yet reported.
 
@@ -222,7 +223,7 @@ The v0.9 dashboard also shows valid tensor manifests found in the dashboard host
 8. Add a verified streaming runtime handoff from a manifest to an open payload reader. (Added in v0.10.)
 9. Inspect GGUF model metadata and tensor tables, and surface a local model catalog in the dashboard. (Added in v0.11; metadata inspection only.)
 10. Stream validated GGUF tensor byte ranges from the original model file to workers for the initial supported type subset. (File-backed range transfer added in v0.12; llama.cpp mapping remains to be validated.)
-11. Add exact GGML storage/stride coverage for common K-quants and IQ formats, then validate tensor mapping against llama.cpp.
+11. Add exact GGML storage/stride coverage for common K-quants and IQ formats, then validate tensor mapping against llama.cpp. (Descriptor mapping and synthetic file-range tests added in v0.13; runtime decoding remains unverified.)
 12. Integrate llama.cpp on CPU first and execute a remote layer on a worker.
 13. Implement pipeline partitioning: place contiguous transformer layer ranges on workers, transfer activations, and stream generated tokens.
 14. Add automatic memory-aware placement, then GPU/Metal/CUDA acceleration and performance tuning.

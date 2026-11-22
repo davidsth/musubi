@@ -286,9 +286,27 @@ fn descriptor_encoding(type_id: u32) -> Option<(TensorDType, TensorEncoding)> {
         6 => Some((TensorDType::F32, TensorEncoding::GgmlQ5_0)),
         7 => Some((TensorDType::F32, TensorEncoding::GgmlQ5_1)),
         8 => Some((TensorDType::F32, TensorEncoding::GgmlQ8_0)),
+        9 => Some((TensorDType::F32, TensorEncoding::GgmlQ8_1)),
+        10 => Some((TensorDType::F32, TensorEncoding::GgmlQ2K)),
+        11 => Some((TensorDType::F32, TensorEncoding::GgmlQ3K)),
+        12 => Some((TensorDType::F32, TensorEncoding::GgmlQ4K)),
+        13 => Some((TensorDType::F32, TensorEncoding::GgmlQ5K)),
+        14 => Some((TensorDType::F32, TensorEncoding::GgmlQ6K)),
+        15 => Some((TensorDType::F32, TensorEncoding::GgmlQ8K)),
+        16 => Some((TensorDType::F32, TensorEncoding::GgmlIq2Xxs)),
+        17 => Some((TensorDType::F32, TensorEncoding::GgmlIq2Xs)),
+        18 => Some((TensorDType::F32, TensorEncoding::GgmlIq3Xxs)),
+        19 => Some((TensorDType::F32, TensorEncoding::GgmlIq1S)),
+        20 => Some((TensorDType::F32, TensorEncoding::GgmlIq4Nl)),
+        21 => Some((TensorDType::F32, TensorEncoding::GgmlIq3S)),
+        22 => Some((TensorDType::F32, TensorEncoding::GgmlIq2S)),
+        23 => Some((TensorDType::F32, TensorEncoding::GgmlIq4Xs)),
         24 => Some((TensorDType::I8, TensorEncoding::Raw)),
+        25 => Some((TensorDType::I16, TensorEncoding::Raw)),
         26 => Some((TensorDType::I32, TensorEncoding::Raw)),
         27 => Some((TensorDType::I64, TensorEncoding::Raw)),
+        28 => Some((TensorDType::F64, TensorEncoding::Raw)),
+        29 => Some((TensorDType::F32, TensorEncoding::GgmlIq1M)),
         30 => Some((TensorDType::BF16, TensorEncoding::Raw)),
         _ => None,
     }
@@ -950,6 +968,32 @@ mod tests {
         put_u64(bytes, value);
     }
 
+    fn single_tensor_fixture(type_id: u32, dimensions: &[u64], payload_len: u64) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"GGUF");
+        put_u32(&mut bytes, 3);
+        put_u64(&mut bytes, 1);
+        put_u64(&mut bytes, 2);
+        put_string_metadata(&mut bytes, "general.architecture", "llama");
+        put_u32_metadata(&mut bytes, "general.alignment", 32);
+
+        put_string(&mut bytes, b"tensor.weight");
+        put_u32(&mut bytes, dimensions.len() as u32);
+        for dimension in dimensions {
+            put_u64(&mut bytes, *dimension);
+        }
+        put_u32(&mut bytes, type_id);
+        put_u64(&mut bytes, 0);
+
+        while bytes.len() % 32 != 0 {
+            bytes.push(0);
+        }
+        for index in 0..payload_len {
+            bytes.push((index % 251) as u8);
+        }
+        bytes
+    }
+
     fn fixture() -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"GGUF");
@@ -1171,4 +1215,71 @@ mod tests {
         assert!(error.to_string().contains("not supported by AITP transfer"));
         std::fs::remove_file(path).unwrap();
     }
+
+    #[test]
+    fn every_mapped_ggml_type_opens_a_validated_exact_file_range() {
+        let cases = [
+            (0, "F32", TensorDType::F32, TensorEncoding::Raw, 1, 4),
+            (1, "F16", TensorDType::F16, TensorEncoding::Raw, 1, 2),
+            (2, "Q4_0", TensorDType::F32, TensorEncoding::GgmlQ4_0, 32, 18),
+            (3, "Q4_1", TensorDType::F32, TensorEncoding::GgmlQ4_1, 32, 20),
+            (6, "Q5_0", TensorDType::F32, TensorEncoding::GgmlQ5_0, 32, 22),
+            (7, "Q5_1", TensorDType::F32, TensorEncoding::GgmlQ5_1, 32, 24),
+            (8, "Q8_0", TensorDType::F32, TensorEncoding::GgmlQ8_0, 32, 34),
+            (9, "Q8_1", TensorDType::F32, TensorEncoding::GgmlQ8_1, 32, 36),
+            (10, "Q2_K", TensorDType::F32, TensorEncoding::GgmlQ2K, 256, 84),
+            (11, "Q3_K", TensorDType::F32, TensorEncoding::GgmlQ3K, 256, 110),
+            (12, "Q4_K", TensorDType::F32, TensorEncoding::GgmlQ4K, 256, 144),
+            (13, "Q5_K", TensorDType::F32, TensorEncoding::GgmlQ5K, 256, 176),
+            (14, "Q6_K", TensorDType::F32, TensorEncoding::GgmlQ6K, 256, 210),
+            (15, "Q8_K", TensorDType::F32, TensorEncoding::GgmlQ8K, 256, 292),
+            (16, "IQ2_XXS", TensorDType::F32, TensorEncoding::GgmlIq2Xxs, 256, 66),
+            (17, "IQ2_XS", TensorDType::F32, TensorEncoding::GgmlIq2Xs, 256, 74),
+            (18, "IQ3_XXS", TensorDType::F32, TensorEncoding::GgmlIq3Xxs, 256, 98),
+            (19, "IQ1_S", TensorDType::F32, TensorEncoding::GgmlIq1S, 256, 50),
+            (20, "IQ4_NL", TensorDType::F32, TensorEncoding::GgmlIq4Nl, 32, 18),
+            (21, "IQ3_S", TensorDType::F32, TensorEncoding::GgmlIq3S, 256, 110),
+            (22, "IQ2_S", TensorDType::F32, TensorEncoding::GgmlIq2S, 256, 82),
+            (23, "IQ4_XS", TensorDType::F32, TensorEncoding::GgmlIq4Xs, 256, 136),
+            (24, "I8", TensorDType::I8, TensorEncoding::Raw, 1, 1),
+            (25, "I16", TensorDType::I16, TensorEncoding::Raw, 1, 2),
+            (26, "I32", TensorDType::I32, TensorEncoding::Raw, 1, 4),
+            (27, "I64", TensorDType::I64, TensorEncoding::Raw, 1, 8),
+            (28, "F64", TensorDType::F64, TensorEncoding::Raw, 1, 8),
+            (29, "IQ1_M", TensorDType::F32, TensorEncoding::GgmlIq1M, 256, 56),
+            (30, "BF16", TensorDType::BF16, TensorEncoding::Raw, 1, 2),
+        ];
+
+        for (type_id, type_name, dtype, encoding, block_elements, block_bytes) in cases {
+            let shape = vec![block_elements * 2, 3];
+            let byte_len = block_bytes * 6;
+            let path = std::env::temp_dir().join(format!(
+                "aitp-gguf-mapping-{}-{type_id}.gguf",
+                uuid::Uuid::new_v4()
+            ));
+            let bytes = single_tensor_fixture(type_id, &shape, byte_len);
+            std::fs::write(&path, &bytes).unwrap();
+
+            let source = open_tensor_source(&path, "tensor.weight", 900 + type_id)
+                .unwrap_or_else(|error| panic!("type {type_name} ({type_id}) failed: {error:#}"));
+            let (mut file, descriptor, offset) = source.into_parts();
+
+            assert_eq!(descriptor.tensor_id, 900 + type_id);
+            assert_eq!(descriptor.dtype, dtype, "type {type_name}");
+            assert_eq!(descriptor.encoding, encoding, "type {type_name}");
+            assert_eq!(descriptor.layout, TensorLayout::Ggml);
+            assert_eq!(descriptor.shape, shape, "type {type_name}");
+            assert_eq!(descriptor.byte_len, byte_len, "type {type_name}");
+            assert!(descriptor.validate().is_ok(), "type {type_name}");
+
+            file.seek(SeekFrom::Start(offset)).unwrap();
+            let mut actual = vec![0u8; byte_len as usize];
+            file.read_exact(&mut actual).unwrap();
+            let expected: Vec<u8> = (0..byte_len).map(|index| (index % 251) as u8).collect();
+            assert_eq!(actual, expected, "type {type_name}");
+            drop(file);
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
 }
