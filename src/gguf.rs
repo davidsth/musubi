@@ -532,16 +532,6 @@ pub fn parse_reader<R: Read + Seek>(
         );
     }
 
-    let descriptor_end = reader.stream_position()?;
-    let data_offset = if tensor_count == 0 {
-        descriptor_end
-    } else {
-        align_up(descriptor_end, u64::from(alignment))?
-    };
-    if data_offset > file_len {
-        bail!("GGUF tensor-data offset is beyond the end of the file");
-    }
-
     let mut tensors = Vec::with_capacity((tensor_count as usize).min(4096));
     let mut tensor_names = HashSet::new();
     let mut ranges = Vec::new();
@@ -600,16 +590,10 @@ pub fn parse_reader<R: Read + Seek>(
                     .checked_mul(bytes_per_block)
                     .and_then(|row_bytes| row_bytes.checked_mul(rows))
                     .context("GGUF tensor byte length overflow")?;
-                let absolute_start = data_offset
-                    .checked_add(relative_offset)
-                    .context("GGUF absolute tensor offset overflow")?;
-                let absolute_end = absolute_start
+                let relative_end = relative_offset
                     .checked_add(bytes)
-                    .context("GGUF tensor end offset overflow")?;
-                if absolute_end > file_len {
-                    bail!("GGUF tensor '{name}' extends beyond the file length");
-                }
-                ranges.push((absolute_start, absolute_end, name.clone()));
+                    .context("GGUF tensor relative end offset overflow")?;
+                ranges.push((relative_offset, relative_end, name.clone()));
                 known_tensor_bytes = known_tensor_bytes
                     .checked_add(bytes)
                     .context("GGUF known tensor byte total overflow")?;
@@ -617,29 +601,56 @@ pub fn parse_reader<R: Read + Seek>(
             }
             None => {
                 unsupported_tensor_count += 1;
-                let absolute_start = data_offset
-                    .checked_add(relative_offset)
-                    .context("GGUF absolute tensor offset overflow")?;
-                if absolute_start >= file_len {
-                    bail!("GGUF tensor '{name}' offset is beyond the tensor data");
-                }
                 None
             }
         };
 
         *tensor_type_counts.entry(type_name.clone()).or_insert(0) += 1;
-        let file_offset = data_offset
-            .checked_add(relative_offset)
-            .context("GGUF absolute tensor offset overflow")?;
         tensors.push(GgufTensorInfo {
             name,
             dimensions,
             ggml_type_id,
             type_name,
             relative_offset,
-            file_offset,
+            // The absolute offset depends on the end of the complete tensor table.
+            // It is filled after all descriptors have been parsed.
+            file_offset: 0,
             byte_len,
         });
+    }
+
+    // GGUF tensor data begins after the *entire* tensor-info table, aligned to
+    // general.alignment. Computing this after the loop is essential: using the
+    // end of metadata would point tensor reads back into the descriptor table.
+    let descriptor_end = reader.stream_position()?;
+    let data_offset = if tensor_count == 0 {
+        descriptor_end
+    } else {
+        align_up(descriptor_end, u64::from(alignment))?
+    };
+    if data_offset > file_len {
+        bail!("GGUF tensor-data offset is beyond the end of the file");
+    }
+
+    for tensor in &mut tensors {
+        let absolute_start = data_offset
+            .checked_add(tensor.relative_offset)
+            .context("GGUF absolute tensor offset overflow")?;
+        match tensor.byte_len {
+            Some(byte_len) => {
+                let absolute_end = absolute_start
+                    .checked_add(byte_len)
+                    .context("GGUF tensor end offset overflow")?;
+                if absolute_end > file_len {
+                    bail!("GGUF tensor '{}' extends beyond the file length", tensor.name);
+                }
+            }
+            None if absolute_start >= file_len => {
+                bail!("GGUF tensor '{}' offset is beyond the tensor data", tensor.name);
+            }
+            None => {}
+        }
+        tensor.file_offset = absolute_start;
     }
 
     ranges.sort_by_key(|range| range.0);

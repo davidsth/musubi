@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.13.1 — Correct GGUF tensor-data section offset
+
+- Fixed the GGUF parser to calculate the aligned tensor-data section after reading the complete tensor-info table, rather than after metadata.
+- Validate absolute byte ranges only after the correct data-section base is known; unknown-size tensors still require an in-file starting offset.
+- Expanded the cross-format synthetic test to read every mapped tensor range byte-for-byte, which exposed this pre-existing offset bug.
+- Bumped the package patch version to 0.13.1; the control-plane schema remains version 6.
+- No data-plane header, admission, or transfer framing changes.
+
 ## v0.13.0 — Expanded GGML quantized tensor transfer descriptors
 
 - Added exact AITP block encodings for Q8_1, Q2_K through Q8_K, and IQ1/IQ2/IQ3/IQ4 variants, including IQ1_M.
