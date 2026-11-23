@@ -516,7 +516,7 @@ mod tests {
                 file_offset: offset,
                 byte_len: Some(*bytes),
             });
-            offset += bytes;
+            offset += *bytes;
         }
         if shared_bytes > 0 {
             tensors.push(GgufTensorInfo {
