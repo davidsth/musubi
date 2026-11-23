@@ -188,6 +188,29 @@ The command parses and validates the GGUF tensor table from a securely opened mo
 
 The v0.13 transfer mapping covers raw F32/F16/BF16/I8/I16/I32/I64/F64 plus Q4_0/Q4_1/Q5_0/Q5_1/Q8_0/Q8_1, Q2_K through Q8_K, and IQ1/IQ2/IQ3/IQ4 variants (IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_NL, and IQ4_XS). Block sizes and type IDs are cross-checked against llama.cpp ggml-common.h; descriptors preserve the opaque encoding and GGML dimension order (dimension zero is the innermost block axis), and validate exact per-row storage sizes with checked arithmetic. Q8_1 and Q8_K are included for format completeness and commonly support intermediate quantization/dot-product paths rather than ordinary model weights. TQ1_0, TQ2_0, MXFP4, and other unverified/newer encodings still fail closed. This metadata mapping does not dequantize bytes or prove that a tensor is executable by a particular runtime. The control-plane schema is version 6 so older workers reject the expanded descriptor encoding set rather than misinterpreting it. The existing worker limit of 1 GiB per tensor still applies. This sends a single tensor artifact, not a complete model and not an executable model layer.
 
+
+## Memory-aware GGUF layer-placement preview v0.14
+
+The **plan-gguf** command creates a read-only placement proposal from one local GGUF file and a JSON snapshot of the manager's current node inventory. It never contacts workers, reserves remote memory, transfers weights, or starts inference.
+
+Export the current manager snapshot (run the manager and node agents first):
+
+    curl http://127.0.0.1:9003/api/cluster --output cluster.json
+
+Generate a placement preview:
+
+    cargo run --release -- plan-gguf \
+      --model ./aitp-models/model.gguf \
+      --nodes cluster.json \
+      --reserve-percent 20 \
+      --output model-placement.json
+
+The input may be the full /api/cluster response or a bare JSON array of node objects. Offline nodes are ignored. The planner uses each online node's latest available_memory_bytes, subtracts the requested reserve (20% by default), and sorts nodes by usable RAM with a stable node-ID tie-break. It sums the known storage bytes of each canonical blk.<layer>.* tensor, then finds a contiguous layer partition that minimizes the highest planned weight-memory utilization. Layer order is preserved. Tensors outside blk.<layer>.* names (for example embeddings and output weights) are charged once to the largest-RAM node.
+
+Planning fails closed when GGUF layer metadata or a layer index is missing, tensor sizes are unsupported, node IDs are duplicated, or the estimated weights do not fit within usable RAM. The default output is JSON on stdout. The --output option writes a new file and refuses to overwrite an existing path.
+
+This is a weight-storage estimate, not an inference-memory guarantee. It excludes KV cache, activations, runtime workspaces, allocator overhead, model replicas, transfer buffers, and network/compute performance. The planner does not use GPU VRAM or accelerator capability yet. It is a precursor to live workload allocation, not a llama.cpp loader or execution path.
+
 ## Cluster dashboard v0.7
 
 The manager serves a responsive, read-only web dashboard over HTTP. The dashboard is intentionally separate from the UDP tensor data plane and reads a snapshot of the manager's in-memory node inventory. It does not issue commands to nodes, allocate workloads, or execute code. The default bind is localhost; LAN exposure requires an explicit bind-address override. The dashboard currently has no authentication or TLS, so keep it on localhost or a trusted isolated LAN.
@@ -208,7 +231,7 @@ The v0.9 dashboard also shows valid tensor manifests found in the dashboard host
 - The authenticated tensor receiver stages completed payloads to disk and publishes a SHA-256 manifest. v0.10 adds a verified streaming file handle for runtime adapters, but there is not yet a tensor allocator, mmap-backed adapter, model loader, or inference execution path. Verification occurs when the handle is opened; keep the local tensor store trusted and do not modify a payload while a runtime is consuming its open handle. The dashboard's artifact catalog is local to the manager host and does not aggregate remote worker stores.
 - The GGUF v0.11 inspector reads bounded model metadata and tensor descriptors only. It is not a GGUF loader; unsupported tensor type sizes are left unknown, and big-endian GGUF is rejected.
 - GGUF transfer descriptors currently describe contiguous GGML tensor storage only; arbitrary tensor views/strides, dequantization, and runtime operation compatibility are not implemented.
-- No inference-runtime integration, GPU-direct networking, RDMA, or zero-copy path.
+- No inference-runtime integration, GPU-direct networking, RDMA, or zero-copy path. The v0.14 placement planner is advisory only; it does not allocate workloads or load models on workers.
 - Hardware inventory includes CPU model, OS, architecture, logical CPU count, total RAM, periodically refreshed available RAM, and best-effort accelerator names/vendors/memory. NVIDIA VRAM is reported when nvidia-smi is installed. Apple Silicon is represented as an integrated GPU sharing unified system memory. Some platform probes identify devices without reliable VRAM data. Compute capability, utilization, and measured throughput are not yet reported.
 
 ## Roadmap
@@ -226,7 +249,7 @@ The v0.9 dashboard also shows valid tensor manifests found in the dashboard host
 11. Add exact GGML storage/stride coverage for common K-quants and IQ formats, then validate tensor mapping against llama.cpp. (Descriptor mapping and synthetic file-range tests added in v0.13; runtime decoding remains unverified.)
 12. Integrate llama.cpp on CPU first and execute a remote layer on a worker.
 13. Implement pipeline partitioning: place contiguous transformer layer ranges on workers, transfer activations, and stream generated tokens.
-14. Add automatic memory-aware placement, then GPU/Metal/CUDA acceleration and performance tuning.
+14. Add automatic memory-aware placement, then GPU/Metal/CUDA acceleration and performance tuning. (Initial CPU-RAM-only dry-run planner added in v0.14; live allocation and runtime-aware memory sizing remain future work.)
 15. Add control-plane authentication, congestion control, and benchmarking.
 16. Add a cluster dashboard for live node inventory. (Initial read-only dashboard added in v0.7; local tensor catalog added in v0.9; local GGUF catalog added in v0.11.)
 

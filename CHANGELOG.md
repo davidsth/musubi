@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.14.0 — Add advisory memory-aware GGUF layer placement
+
+- Added a bounded node-inventory reader that accepts the manager's read-only /api/cluster JSON snapshot or a bare node array.
+- Added a deterministic dry-run planner that uses online nodes' current available RAM, with a configurable reserve and stable capacity ordering.
+- Groups canonical blk.<layer>.* tensors into transformer layers and finds contiguous layer ranges that minimize the highest planned weight-memory utilization.
+- Charges non-layer tensors (including embedding/output tensors) once to the largest-capacity node.
+- Fails closed on missing layer metadata, missing layer indices, unsupported tensor sizes, duplicate node IDs, and insufficient usable RAM.
+- Added the plan-gguf CLI command with JSON stdout and optional create-new file output.
+- Added tests for contiguous placement, shared tensors, offline-node filtering, deterministic ordering, insufficient memory, unsupported tensors, invalid layer indices, duplicate node IDs, and dashboard snapshot parsing.
+- No control-plane or data-plane wire changes, remote allocation, model loading, or remote execution.
+
+
 ## v0.13.1 — Correct GGUF tensor-data section offset
 
 - Fixed the GGUF parser to calculate the aligned tensor-data section after reading the complete tensor-info table, rather than after metadata.

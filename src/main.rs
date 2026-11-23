@@ -4,6 +4,7 @@ mod dashboard;
 mod gguf;
 mod hardware;
 mod protocol;
+mod planner;
 mod runtime;
 mod storage;
 mod tensor;
@@ -154,6 +155,21 @@ enum Command {
         #[arg(long)]
         directory: Option<PathBuf>,
     },
+    /// Create a read-only memory-aware layer-placement preview from a GGUF model and cluster snapshot.
+    PlanGguf {
+        /// Source GGUF model file.
+        #[arg(long)]
+        model: PathBuf,
+        /// JSON exported from the manager's /api/cluster endpoint (or a bare node array).
+        #[arg(long)]
+        nodes: PathBuf,
+        /// Percentage of each node's currently available RAM to keep unused.
+        #[arg(long, default_value_t = 20)]
+        reserve_percent: u8,
+        /// Optional new JSON output file; existing files are never overwritten.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
     /// Run a cluster manager that tracks registrations and node liveness.
     Manager {
         #[arg(long, default_value = "0.0.0.0:9002")]
@@ -213,6 +229,12 @@ async fn main() -> Result<()> {
             tensor_limit,
         } => inspect_gguf(input, tensor_limit),
         Command::GgufCatalog { directory } => catalog_gguf(directory),
+        Command::PlanGguf {
+            model,
+            nodes,
+            reserve_percent,
+            output,
+        } => plan_gguf(model, nodes, reserve_percent, output),
         Command::Manager {
             bind,
             timeout_ms,
@@ -340,6 +362,46 @@ async fn prepare_tensor(manifest_path: PathBuf, directory: Option<PathBuf>) -> R
     println!("SHA-256: {}", prepared.manifest().sha256);
     println!("A read-only streaming handle is open at byte 0. No bytes were copied into a second buffer or passed to a model runtime.");
     drop(prepared);
+    Ok(())
+}
+
+fn plan_gguf(
+    model_path: PathBuf,
+    nodes_path: PathBuf,
+    reserve_percent: u8,
+    output: Option<PathBuf>,
+) -> Result<()> {
+    let model = gguf::inspect_file(&model_path)
+        .with_context(|| format!("inspecting GGUF model {}", model_path.display()))?;
+    let nodes = planner::load_nodes(&nodes_path)?;
+    let plan = planner::create_plan(&model, &nodes, reserve_percent)?;
+    let encoded = serde_json::to_string_pretty(&plan)?;
+
+    if let Some(output_path) = output {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&output_path)
+            .with_context(|| {
+                format!(
+                    "creating placement plan {} without overwriting an existing file",
+                    output_path.display()
+                )
+            })?;
+        file.write_all(encoded.as_bytes())
+            .with_context(|| format!("writing placement plan {}", output_path.display()))?;
+        file.write_all(b"\n")?;
+        println!(
+            "Wrote advisory placement plan to {}",
+            output_path.display()
+        );
+        println!(
+            "Assigned {} transformer layers across {} node(s); maximum planned weight utilization {:.2}%.",
+            plan.layer_count, plan.used_nodes, plan.target_max_utilization_percent
+        );
+    } else {
+        println!("{encoded}");
+    }
     Ok(())
 }
 
