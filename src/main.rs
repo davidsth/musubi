@@ -3,8 +3,8 @@ mod control;
 mod dashboard;
 mod gguf;
 mod hardware;
-mod protocol;
 mod planner;
+mod protocol;
 mod runtime;
 mod storage;
 mod tensor;
@@ -391,10 +391,7 @@ fn plan_gguf(
         file.write_all(encoded.as_bytes())
             .with_context(|| format!("writing placement plan {}", output_path.display()))?;
         file.write_all(b"\n")?;
-        println!(
-            "Wrote advisory placement plan to {}",
-            output_path.display()
-        );
+        println!("Wrote advisory placement plan to {}", output_path.display());
         println!(
             "Assigned {} transformer layers across {} node(s); maximum planned weight utilization {:.2}%.",
             plan.layer_count, plan.used_nodes, plan.target_max_utilization_percent

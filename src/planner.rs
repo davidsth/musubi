@@ -6,11 +6,7 @@
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashSet,
-    fs,
-    path::Path,
-};
+use std::{collections::HashSet, fs, path::Path};
 
 use crate::gguf::GgufModelSummary;
 
@@ -60,8 +56,8 @@ pub fn load_nodes(path: &Path) -> Result<Vec<PlannerNode>> {
         );
     }
 
-    let encoded = fs::read(path)
-        .with_context(|| format!("reading node inventory {}", path.display()))?;
+    let encoded =
+        fs::read(path).with_context(|| format!("reading node inventory {}", path.display()))?;
     if encoded.len() as u64 > MAX_NODE_INVENTORY_BYTES {
         bail!("node inventory exceeds the configured size limit");
     }
@@ -178,7 +174,10 @@ pub fn create_plan(
             bail!("cluster inventory contains an invalid node hostname");
         }
         if !node_ids.insert(node.node_id.as_str()) {
-            bail!("cluster inventory contains duplicate node ID '{}'", node.node_id);
+            bail!(
+                "cluster inventory contains duplicate node ID '{}'",
+                node.node_id
+            );
         }
         if !node.online {
             offline_nodes_ignored += 1;
@@ -279,13 +278,8 @@ pub fn create_plan(
         }
     }
 
-    let allocations = allocate_layers(
-        &layer_weights,
-        &active_nodes,
-        non_layer_tensor_bytes,
-        low,
-    )
-    .context("could not reconstruct the validated placement")?;
+    let allocations = allocate_layers(&layer_weights, &active_nodes, non_layer_tensor_bytes, low)
+        .context("could not reconstruct the validated placement")?;
 
     let mut node_assignments = Vec::with_capacity(active_nodes.len());
     let mut max_utilization_percent = 0.0f64;
@@ -294,9 +288,8 @@ pub fn create_plan(
             .layer_weight_bytes
             .checked_add(allocation.non_layer_tensor_bytes)
             .context("node assigned-byte total overflow")?;
-        let utilization_percent = assigned_weight_bytes as f64
-            * 100.0
-            / capacity.usable_memory_bytes as f64;
+        let utilization_percent =
+            assigned_weight_bytes as f64 * 100.0 / capacity.usable_memory_bytes as f64;
         max_utilization_percent = max_utilization_percent.max(utilization_percent);
 
         node_assignments.push(NodePlacement {
@@ -308,9 +301,7 @@ pub fn create_plan(
             usable_memory_bytes: capacity.usable_memory_bytes,
             non_layer_tensor_bytes: allocation.non_layer_tensor_bytes,
             first_layer: allocation.first_layer.map(|value| value as u64),
-            end_layer_exclusive: allocation
-                .end_layer_exclusive
-                .map(|value| value as u64),
+            end_layer_exclusive: allocation.end_layer_exclusive.map(|value| value as u64),
             layer_count: allocation
                 .end_layer_exclusive
                 .zip(allocation.first_layer)
@@ -354,9 +345,7 @@ pub fn create_plan(
     })
 }
 
-fn inspect_model_weights(
-    model: &GgufModelSummary,
-) -> Result<(Vec<u64>, u64, u64, u64)> {
+fn inspect_model_weights(model: &GgufModelSummary) -> Result<(Vec<u64>, u64, u64, u64)> {
     let layer_count = model
         .layer_count
         .context("GGUF model metadata does not declare a transformer layer count")?;
@@ -467,8 +456,7 @@ fn allocate_layers(
     let mut allocations = Vec::with_capacity(nodes.len());
 
     for (node_index, node) in nodes.iter().enumerate() {
-        let budget = ((node.usable_memory_bytes as u128)
-            * (utilization_basis_points as u128)
+        let budget = ((node.usable_memory_bytes as u128) * (utilization_basis_points as u128)
             / (UTILIZATION_BASIS_POINTS as u128)) as u64;
         let fixed_bytes = if node_index == 0 {
             non_layer_tensor_bytes
@@ -650,7 +638,9 @@ mod tests {
         model.tensors[0].name = "blk.2.attn_q.weight".into();
 
         let error = create_plan(&model, &[node("a", 100, true)], 0).unwrap_err();
-        assert!(error.to_string().contains("outside the declared layer count"));
+        assert!(error
+            .to_string()
+            .contains("outside the declared layer count"));
     }
 
     #[test]
