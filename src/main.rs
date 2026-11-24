@@ -1047,7 +1047,10 @@ async fn run_node(
             );
         }
         socket.send_to(&registration, manager_addr).await?;
-        println!("Sent authenticated registration to cluster manager at {}", manager_addr);
+        println!(
+            "Sent authenticated registration to cluster manager at {}",
+            manager_addr
+        );
     }
 
     let mut heartbeat = tokio::time::interval(Duration::from_millis(heartbeat_ms.max(100)));

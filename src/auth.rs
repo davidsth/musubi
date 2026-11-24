@@ -5,14 +5,11 @@ use anyhow::{bail, Result};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
-use crate::control::{
-    NodeAnnouncement, TensorOfferMessage, TensorOfferReply, CONTROL_VERSION,
-};
+use crate::control::{NodeAnnouncement, TensorOfferMessage, TensorOfferReply, CONTROL_VERSION};
 
 type HmacSha256 = Hmac<Sha256>;
 pub const MIN_CLUSTER_KEY_BYTES: usize = 32;
 pub const HMAC_TAG_BYTES: usize = 32;
-
 
 fn valid_session_id(session_id: &str) -> bool {
     uuid::Uuid::parse_str(session_id).is_ok()
@@ -339,7 +336,10 @@ mod tests {
         let tag = sign_node_registration(&node, &session, &key).unwrap();
 
         assert!(verify_node_registration(&node, &session, &tag, &key).unwrap());
-        assert!(!verify_node_registration(&node, &uuid::Uuid::new_v4().to_string(), &tag, &key).unwrap());
+        assert!(
+            !verify_node_registration(&node, &uuid::Uuid::new_v4().to_string(), &tag, &key)
+                .unwrap()
+        );
 
         let mut changed = node.clone();
         changed.hostname.push_str("-spoofed");
@@ -355,15 +355,8 @@ mod tests {
     fn heartbeat_tag_binds_node_session_sequence_and_memory() {
         let key = [0x52; 32];
         let session = uuid::Uuid::new_v4().to_string();
-        let tag = sign_node_heartbeat(
-            CONTROL_VERSION,
-            "stable-node",
-            &session,
-            7,
-            12_345,
-            &key,
-        )
-        .unwrap();
+        let tag =
+            sign_node_heartbeat(CONTROL_VERSION, "stable-node", &session, 7, 12_345, &key).unwrap();
 
         assert!(verify_node_heartbeat(
             CONTROL_VERSION,
@@ -373,7 +366,8 @@ mod tests {
             12_345,
             &tag,
             &key
-        ).unwrap());
+        )
+        .unwrap());
         assert!(!verify_node_heartbeat(
             CONTROL_VERSION,
             "stable-node",
@@ -382,7 +376,8 @@ mod tests {
             12_345,
             &tag,
             &key
-        ).unwrap());
+        )
+        .unwrap());
         assert!(!verify_node_heartbeat(
             CONTROL_VERSION,
             "stable-node",
@@ -391,7 +386,8 @@ mod tests {
             12_346,
             &tag,
             &key
-        ).unwrap());
+        )
+        .unwrap());
         assert!(!verify_node_heartbeat(
             CONTROL_VERSION,
             "other-node",
@@ -400,7 +396,8 @@ mod tests {
             12_345,
             &tag,
             &key
-        ).unwrap());
+        )
+        .unwrap());
     }
 
     #[test]
