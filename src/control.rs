@@ -3,7 +3,7 @@
 use crate::tensor::TensorDescriptor;
 use serde::{Deserialize, Serialize};
 
-pub const CONTROL_VERSION: u8 = 6;
+pub const CONTROL_VERSION: u8 = 7;
 pub const MAX_CONTROL_DATAGRAM: usize = 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16,6 +16,10 @@ pub enum ControlMessage {
     Announce(NodeAnnouncement),
     Register {
         node: NodeAnnouncement,
+        /// Random UUID generated for this process lifetime.
+        session_id: String,
+        /// HMAC-SHA256 over the announcement and session ID.
+        auth_tag: Vec<u8>,
     },
     TensorOffer {
         offer: TensorOfferMessage,
@@ -26,8 +30,12 @@ pub enum ControlMessage {
     Heartbeat {
         version: u8,
         node_id: String,
+        /// Must match the authenticated registration's process session.
+        session_id: String,
         sequence: u64,
         available_memory_bytes: u64,
+        /// HMAC-SHA256 over the heartbeat fields.
+        auth_tag: Vec<u8>,
     },
 }
 
@@ -135,13 +143,28 @@ mod tests {
         let node = sample_node();
         assert!(node.is_valid());
 
+        let mut registered_node = node.clone();
+        registered_node.nonce.clear();
+        let session_id = "d290f1ee-6c54-4b01-90e6-d701748f0851".to_string();
         for message in [
             ControlMessage::Discover {
                 version: CONTROL_VERSION,
                 nonce: "test-nonce".into(),
             },
             ControlMessage::Announce(node.clone()),
-            ControlMessage::Register { node },
+            ControlMessage::Register {
+                node: registered_node,
+                session_id: session_id.clone(),
+                auth_tag: vec![7; 32],
+            },
+            ControlMessage::Heartbeat {
+                version: CONTROL_VERSION,
+                node_id: "stable-id".into(),
+                session_id,
+                sequence: 1,
+                available_memory_bytes: 8 * 1024 * 1024 * 1024,
+                auth_tag: vec![8; 32],
+            },
         ] {
             let encoded = serde_json::to_vec(&message).unwrap();
             assert!(encoded.len() <= MAX_CONTROL_DATAGRAM);

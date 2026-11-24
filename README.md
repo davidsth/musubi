@@ -98,7 +98,7 @@ AITP now defines a bounded `TensorDescriptor` schema for the worker-execution mi
 
 ## Authenticated tensor-offer admission v0.6
 
-A node validates incoming tensor metadata offers when the AITP_CLUSTER_KEY environment variable is configured. Use the same random secret (at least 32 bytes) on the sender and worker. Generate one with openssl rand -hex 32 and set it in both process environments.
+A node validates incoming tensor metadata offers when the AITP_CLUSTER_KEY environment variable is configured. A node that registers with a cluster manager must use the same key as the manager; manager membership is authenticated in v0.15. Use the same random secret (at least 32 bytes) on all participating machines. Generate one with openssl rand -hex 32 and set it in each process environment.
 
 macOS/Linux:
 
@@ -224,10 +224,9 @@ The v0.9 dashboard also shows valid tensor manifests found in the dashboard host
 - UDP reliability is experimental; this implementation is not a replacement for a mature congestion-controlled transport.
 - The authenticated tensor receiver handles one active transfer per worker. The legacy generic receiver writes to one configured output path.
 - The legacy generic sender reads its input file into memory. The authenticated `send-tensor` path reads bounded windows from disk.
-- Discovery, registration, and heartbeat messages remain unauthenticated. HMAC does not encrypt metadata or protect against a compromised endpoint. Offer replay counters are held in worker memory and reset when that worker restarts. Use only on a trusted LAN.
+- IPv4 discovery requests and announcements remain unauthenticated metadata-only beacons; an announcement is a discovery hint, not proof of node identity. Manager registration and heartbeats require HMAC authentication with AITP_CLUSTER_KEY. A managed node refuses to start without the key, and the manager refuses to start without it.
+- Manager membership uses one shared cluster key, not per-node certificates. Any holder of that key can impersonate a node ID; HMAC does not encrypt metadata or protect against a compromised endpoint. Heartbeat sequence numbers are checked within the current registered process session; manager inventory and replay state are in-memory and reset on manager restart.
 - Manager inventory is in-memory and is lost when the manager restarts.
-- The manager does not authenticate node IDs; a device on the LAN can attempt to register a claimed ID.
-- Heartbeat liveness is based on sequence-numbered messages and a configurable timeout, not cryptographic identity.
 - The authenticated tensor receiver stages completed payloads to disk and publishes a SHA-256 manifest. v0.10 adds a verified streaming file handle for runtime adapters, but there is not yet a tensor allocator, mmap-backed adapter, model loader, or inference execution path. Verification occurs when the handle is opened; keep the local tensor store trusted and do not modify a payload while a runtime is consuming its open handle. The dashboard's artifact catalog is local to the manager host and does not aggregate remote worker stores.
 - The GGUF v0.11 inspector reads bounded model metadata and tensor descriptors only. It is not a GGUF loader; unsupported tensor type sizes are left unknown, and big-endian GGUF is rejected.
 - GGUF transfer descriptors currently describe contiguous GGML tensor storage only; arbitrary tensor views/strides, dequantization, and runtime operation compatibility are not implemented.
@@ -250,12 +249,30 @@ The v0.9 dashboard also shows valid tensor manifests found in the dashboard host
 12. Integrate llama.cpp on CPU first and execute a remote layer on a worker.
 13. Implement pipeline partitioning: place contiguous transformer layer ranges on workers, transfer activations, and stream generated tokens.
 14. Add automatic memory-aware placement, then GPU/Metal/CUDA acceleration and performance tuning. (Initial CPU-RAM-only dry-run planner added in v0.14; live allocation and runtime-aware memory sizing remain future work.)
-15. Add control-plane authentication, congestion control, and benchmarking.
+15. Add congestion control and end-to-end benchmarking. (Manager registration and heartbeat HMAC authentication were added in v0.15; the shared key is not encryption or per-node identity.)
 16. Add a cluster dashboard for live node inventory. (Initial read-only dashboard added in v0.7; local tensor catalog added in v0.9; local GGUF catalog added in v0.11.)
+
+## Authenticated manager membership v0.15
+
+The cluster manager now requires AITP_CLUSTER_KEY. A node started with --manager also requires the same key. Registration signs the complete node announcement and a fresh UUID process-session ID; heartbeats sign the node ID, session ID, sequence number, and available-memory value. The manager accepts heartbeats only for the currently registered session and only when the sequence increases. The control-plane schema is version 7; older agents must be upgraded together.
+
+macOS/Linux:
+
+    export AITP_CLUSTER_KEY="$(openssl rand -hex 32)"
+    cargo run --release -- manager --bind 0.0.0.0:9002
+    cargo run --release -- node --bind 0.0.0.0:9001 --data-port 9000 --manager 192.168.1.10:9002
+
+Windows PowerShell (set the same secret on the manager and every node):
+
+    $env:AITP_CLUSTER_KEY = "paste-the-same-64-character-hex-secret-on-each-machine"
+    cargo run --release -- manager --bind 0.0.0.0:9002
+    cargo run --release -- node --bind 0.0.0.0:9001 --data-port 9000 --manager 192.168.1.10:9002
+
+Discovery requests and announcements remain unauthenticated so nodes can be found before joining a managed cluster. They expose metadata only and do not authorize registration or workload actions. The shared key is a cluster-wide trust boundary: it is not encryption, does not create distinct per-node credentials, and should be protected like a password. No remote command or arbitrary code execution endpoint is exposed.
 
 ## Security
 
-Discovery, registration, heartbeats, the manager, dashboard, and legacy generic send/receive remain unauthenticated. The tensor offer and authenticated tensor payload path use HMAC-SHA256 with a shared environment-provided key; this provides integrity/authentication but not confidentiality. The receiver enforces a 1 GiB per-tensor ceiling and writes to bounded temporary files. Use a trusted LAN; do not expose these services to the public internet.
+The manager's UDP registration and heartbeat messages, tensor offers, and authenticated tensor payload datagrams use HMAC-SHA256 with the shared environment-provided key; this provides integrity/authentication but not confidentiality. Discovery announcements and the legacy generic send/receive path remain unauthenticated metadata/compatibility paths. The HTTP dashboard is read-only but has no authentication or TLS; keep its default localhost bind unless using a trusted isolated LAN. The receiver enforces a 1 GiB per-tensor ceiling and writes to bounded temporary files. Do not expose these services to the public internet.
 
 ## License
 

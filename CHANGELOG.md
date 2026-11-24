@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.15.0 — Authenticate cluster-manager membership
+
+- Bumped the JSON control-plane schema to version 7; the fixed 32-byte tensor data-plane header is unchanged.
+- Required the shared AITP_CLUSTER_KEY on the cluster manager and on nodes that register with it.
+- Added HMAC-SHA256 authentication for node registration and heartbeats, binding node metadata, an ephemeral process-session UUID, heartbeat sequence, and available-memory report.
+- The manager now rejects invalid registration tags and accepts heartbeats only for the registered session with a strictly increasing sequence.
+- Kept discovery requests/announcements metadata-only and unauthenticated; they cannot register a node or authorize workload actions.
+- Documented the shared-key trust model, macOS/Linux and Windows setup, and remaining replay/identity limitations.
+- Added unit coverage for authenticated registration and heartbeat field binding.
+- No tensor data-plane header, payload format, transfer window, or remote execution behavior changed.
+
+
 ## v0.14.0 — Add advisory memory-aware GGUF layer placement
 
 - Added a bounded node-inventory reader that accepts the manager's read-only /api/cluster JSON snapshot or a bare node array.

@@ -112,7 +112,7 @@ enum Command {
         data_port: u16,
         #[arg(long)]
         name: Option<String>,
-        /// Optional manager control endpoint, for example 192.168.1.10:9002.
+        /// Optional authenticated manager endpoint; requires AITP_CLUSTER_KEY.
         #[arg(long)]
         manager: Option<SocketAddr>,
         #[arg(long, default_value_t = 1000)]
@@ -170,7 +170,7 @@ enum Command {
         #[arg(long)]
         output: Option<PathBuf>,
     },
-    /// Run a cluster manager that tracks registrations and node liveness.
+    /// Run a cluster manager that authenticates node registrations and heartbeats.
     Manager {
         #[arg(long, default_value = "0.0.0.0:9002")]
         bind: SocketAddr,
@@ -944,6 +944,10 @@ async fn run_node(
     heartbeat_ms: u64,
 ) -> Result<()> {
     let cluster_key = auth::cluster_key_from_env()?;
+    if manager.is_some() && cluster_key.is_none() {
+        bail!("joining a managed cluster requires AITP_CLUSTER_KEY (at least 32 bytes), matching the manager");
+    }
+    let session_id = uuid::Uuid::new_v4().to_string();
     if data_port == 0 {
         bail!("data port must be nonzero");
     }
@@ -1026,11 +1030,24 @@ async fn run_node(
     println!("No remote command execution is supported.");
 
     if let Some(manager_addr) = manager {
+        let key = cluster_key
+            .as_deref()
+            .context("joining a managed cluster requires AITP_CLUSTER_KEY")?;
+        let auth_tag = auth::sign_node_registration(&announcement, &session_id, key)?;
         let registration = serde_json::to_vec(&ControlMessage::Register {
             node: announcement.clone(),
+            session_id: session_id.clone(),
+            auth_tag,
         })?;
+        if registration.len() > MAX_CONTROL_DATAGRAM {
+            bail!(
+                "authenticated node registration is {} bytes; control-plane limit is {}",
+                registration.len(),
+                MAX_CONTROL_DATAGRAM
+            );
+        }
         socket.send_to(&registration, manager_addr).await?;
-        println!("Registered with cluster manager at {}", manager_addr);
+        println!("Sent authenticated registration to cluster manager at {}", manager_addr);
     }
 
     let mut heartbeat = tokio::time::interval(Duration::from_millis(heartbeat_ms.max(100)));
@@ -1042,16 +1059,33 @@ async fn run_node(
         tokio::select! {
             _ = heartbeat.tick(), if manager.is_some() => {
                 sequence = sequence.saturating_add(1);
+                let available_memory_bytes = {
+                    system.refresh_memory();
+                    system.available_memory().min(total_memory_bytes)
+                };
+                let key = cluster_key
+                    .as_deref()
+                    .context("managed-cluster heartbeat requires AITP_CLUSTER_KEY")?;
+                let auth_tag = auth::sign_node_heartbeat(
+                    CONTROL_VERSION,
+                    &node_id,
+                    &session_id,
+                    sequence,
+                    available_memory_bytes,
+                    key,
+                )?;
                 let message = ControlMessage::Heartbeat {
                     version: CONTROL_VERSION,
                     node_id: node_id.clone(),
+                    session_id: session_id.clone(),
                     sequence,
-                    available_memory_bytes: {
-                        system.refresh_memory();
-                        system.available_memory()
-                    },
+                    available_memory_bytes,
+                    auth_tag,
                 };
                 let encoded = serde_json::to_vec(&message)?;
+                if encoded.len() > MAX_CONTROL_DATAGRAM {
+                    bail!("authenticated heartbeat exceeds the control-plane datagram limit");
+                }
                 if let Some(manager_addr) = manager {
                     socket.send_to(&encoded, manager_addr).await?;
                 }
@@ -1119,6 +1153,7 @@ struct ManagedNode {
     address: SocketAddr,
     last_seen: Instant,
     last_sequence: u64,
+    session_id: String,
 }
 
 async fn run_manager(
@@ -1126,6 +1161,8 @@ async fn run_manager(
     offline_after: Duration,
     dashboard_bind: SocketAddr,
 ) -> Result<()> {
+    let cluster_key = auth::cluster_key_from_env()?
+        .context("cluster manager requires AITP_CLUSTER_KEY (at least 32 bytes)")?;
     let socket = UdpSocket::bind(bind).await?;
     let dashboard_snapshot = dashboard::shared_snapshot();
     let dashboard_state = dashboard_snapshot.clone();
@@ -1140,6 +1177,7 @@ async fn run_manager(
         offline_after.as_millis()
     );
     println!("Dashboard is read-only and defaults to localhost; use --dashboard-bind to expose it on a trusted LAN.");
+    println!("Manager membership requires HMAC authentication with AITP_CLUSTER_KEY.");
 
     let mut nodes: HashMap<String, ManagedNode> = HashMap::new();
     let tensor_store_dir = storage::configured_store_dir();
@@ -1211,26 +1249,52 @@ async fn run_manager(
                 if n == 0 || n > MAX_CONTROL_DATAGRAM { continue; }
                 let Ok(message) = serde_json::from_slice::<ControlMessage>(&buf[..n]) else { continue };
                 match message {
-                    ControlMessage::Register { node } if node.is_valid() && node.nonce.is_empty()
-                        && (nodes.contains_key(&node.node_id) || nodes.len() < MAX_CLUSTER_NODES) => {
-                        let id = node.node_id.clone();
-                        let is_new = !nodes.contains_key(&id);
-                        nodes.insert(id.clone(), ManagedNode {
-                            announcement: node,
-                            address: peer,
-                            last_seen: Instant::now(),
-                            last_sequence: 0,
-                        });
-                        println!("{} node registration: {} from {}", if is_new { "New" } else { "Refreshed" }, id, peer);
+                    ControlMessage::Register { node, session_id, auth_tag } => {
+                        if auth::verify_node_registration(&node, &session_id, &auth_tag, &cluster_key)?
+                            && (nodes.contains_key(&node.node_id) || nodes.len() < MAX_CLUSTER_NODES)
+                        {
+                            let id = node.node_id.clone();
+                            let is_new = !nodes.contains_key(&id);
+                            nodes.insert(id.clone(), ManagedNode {
+                                announcement: node,
+                                address: peer,
+                                last_seen: Instant::now(),
+                                last_sequence: 0,
+                                session_id,
+                            });
+                            println!(
+                                "{} authenticated node registration: {} from {}",
+                                if is_new { "New" } else { "Refreshed" },
+                                id,
+                                peer
+                            );
+                        }
                     }
-                    ControlMessage::Heartbeat { version, node_id, sequence, available_memory_bytes } if version == CONTROL_VERSION => {
-                        if let Some(node) = nodes.get_mut(&node_id) {
-                            if sequence > node.last_sequence {
-                                node.last_sequence = sequence;
-                                node.last_seen = Instant::now();
-                                node.address = peer;
-                                node.announcement.available_memory_bytes = available_memory_bytes
-                                    .min(node.announcement.total_memory_bytes);
+                    ControlMessage::Heartbeat {
+                        version,
+                        node_id,
+                        session_id,
+                        sequence,
+                        available_memory_bytes,
+                        auth_tag,
+                    } => {
+                        if auth::verify_node_heartbeat(
+                            version,
+                            &node_id,
+                            &session_id,
+                            sequence,
+                            available_memory_bytes,
+                            &auth_tag,
+                            &cluster_key,
+                        )? {
+                            if let Some(node) = nodes.get_mut(&node_id) {
+                                if node.session_id == session_id && sequence > node.last_sequence {
+                                    node.last_sequence = sequence;
+                                    node.last_seen = Instant::now();
+                                    node.address = peer;
+                                    node.announcement.available_memory_bytes = available_memory_bytes
+                                        .min(node.announcement.total_memory_bytes);
+                                }
                             }
                         }
                     }

@@ -1,15 +1,149 @@
-//! Shared-secret authentication for tensor-offer control messages.
+//! Shared-secret authentication for cluster membership and tensor control messages.
 //! HMAC authenticates metadata; it does not encrypt it.
 
 use anyhow::{bail, Result};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
-use crate::control::{TensorOfferMessage, TensorOfferReply};
+use crate::control::{
+    NodeAnnouncement, TensorOfferMessage, TensorOfferReply, CONTROL_VERSION,
+};
 
 type HmacSha256 = Hmac<Sha256>;
 pub const MIN_CLUSTER_KEY_BYTES: usize = 32;
 pub const HMAC_TAG_BYTES: usize = 32;
+
+
+fn valid_session_id(session_id: &str) -> bool {
+    uuid::Uuid::parse_str(session_id).is_ok()
+}
+
+fn node_registration_mac(
+    node: &NodeAnnouncement,
+    session_id: &str,
+    key: &[u8],
+) -> Result<HmacSha256> {
+    let mut mac = new_mac(key, b"AITP/NODE_REGISTER/V1\0")?;
+    update_blob(&mut mac, session_id.as_bytes());
+    let encoded_node = serde_json::to_vec(node)?;
+    update_blob(&mut mac, &encoded_node);
+    Ok(mac)
+}
+
+/// Sign a node registration. Registration announcements must have an empty
+/// discovery nonce; discovery replies remain metadata-only and unauthenticated.
+pub fn sign_node_registration(
+    node: &NodeAnnouncement,
+    session_id: &str,
+    key: &[u8],
+) -> Result<Vec<u8>> {
+    if !valid_session_id(session_id) {
+        bail!("invalid node session ID");
+    }
+    if !node.is_valid() || !node.nonce.is_empty() {
+        bail!("invalid node announcement for registration");
+    }
+    Ok(node_registration_mac(node, session_id, key)?
+        .finalize()
+        .into_bytes()
+        .to_vec())
+}
+
+/// Verify registration authentication before trusting node metadata or the
+/// source endpoint advertised by the UDP peer.
+pub fn verify_node_registration(
+    node: &NodeAnnouncement,
+    session_id: &str,
+    tag: &[u8],
+    key: &[u8],
+) -> Result<bool> {
+    if tag.len() != HMAC_TAG_BYTES
+        || !valid_session_id(session_id)
+        || !node.is_valid()
+        || !node.nonce.is_empty()
+    {
+        return Ok(false);
+    }
+    Ok(node_registration_mac(node, session_id, key)?
+        .verify_slice(tag)
+        .is_ok())
+}
+
+fn node_heartbeat_mac(
+    version: u8,
+    node_id: &str,
+    session_id: &str,
+    sequence: u64,
+    available_memory_bytes: u64,
+    key: &[u8],
+) -> Result<HmacSha256> {
+    let mut mac = new_mac(key, b"AITP/NODE_HEARTBEAT/V1\0")?;
+    mac.update(&[version]);
+    update_blob(&mut mac, node_id.as_bytes());
+    update_blob(&mut mac, session_id.as_bytes());
+    mac.update(&sequence.to_be_bytes());
+    mac.update(&available_memory_bytes.to_be_bytes());
+    Ok(mac)
+}
+
+pub fn sign_node_heartbeat(
+    version: u8,
+    node_id: &str,
+    session_id: &str,
+    sequence: u64,
+    available_memory_bytes: u64,
+    key: &[u8],
+) -> Result<Vec<u8>> {
+    if version != CONTROL_VERSION
+        || node_id.is_empty()
+        || node_id.len() > 64
+        || !valid_session_id(session_id)
+        || sequence == 0
+    {
+        bail!("invalid node heartbeat fields");
+    }
+    Ok(node_heartbeat_mac(
+        version,
+        node_id,
+        session_id,
+        sequence,
+        available_memory_bytes,
+        key,
+    )?
+    .finalize()
+    .into_bytes()
+    .to_vec())
+}
+
+pub fn verify_node_heartbeat(
+    version: u8,
+    node_id: &str,
+    session_id: &str,
+    sequence: u64,
+    available_memory_bytes: u64,
+    tag: &[u8],
+    key: &[u8],
+) -> Result<bool> {
+    if tag.len() != HMAC_TAG_BYTES
+        || version != CONTROL_VERSION
+        || node_id.is_empty()
+        || node_id.len() > 64
+        || !valid_session_id(session_id)
+        || sequence == 0
+    {
+        return Ok(false);
+    }
+    Ok(node_heartbeat_mac(
+        version,
+        node_id,
+        session_id,
+        sequence,
+        available_memory_bytes,
+        key,
+    )?
+    .verify_slice(tag)
+    .is_ok())
+}
 
 pub fn cluster_key_from_env() -> Result<Option<Vec<u8>>> {
     match std::env::var("AITP_CLUSTER_KEY") {
@@ -159,6 +293,23 @@ mod tests {
         tensor::{TensorDType, TensorDescriptor, TensorEncoding, TensorLayout},
     };
 
+    fn sample_node() -> NodeAnnouncement {
+        NodeAnnouncement {
+            version: CONTROL_VERSION,
+            nonce: String::new(),
+            node_id: "stable-node".into(),
+            hostname: "worker-a".into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            logical_cpus: 16,
+            cpu_model: "Example CPU".into(),
+            accelerators: Vec::new(),
+            total_memory_bytes: 32 * 1024 * 1024 * 1024,
+            available_memory_bytes: 24 * 1024 * 1024 * 1024,
+            inference_port: 9000,
+        }
+    }
+
     fn sample_offer(key: &[u8]) -> TensorOfferMessage {
         let mut offer = TensorOfferMessage {
             version: CONTROL_VERSION,
@@ -178,6 +329,78 @@ mod tests {
         };
         sign_tensor_offer(&mut offer, key).unwrap();
         offer
+    }
+
+    #[test]
+    fn node_registration_tag_binds_metadata_and_process_session() {
+        let key = [0x51; 32];
+        let node = sample_node();
+        let session = uuid::Uuid::new_v4().to_string();
+        let tag = sign_node_registration(&node, &session, &key).unwrap();
+
+        assert!(verify_node_registration(&node, &session, &tag, &key).unwrap());
+        assert!(!verify_node_registration(&node, &uuid::Uuid::new_v4().to_string(), &tag, &key).unwrap());
+
+        let mut changed = node.clone();
+        changed.hostname.push_str("-spoofed");
+        assert!(!verify_node_registration(&changed, &session, &tag, &key).unwrap());
+
+        let mut invalid_tag = tag;
+        invalid_tag[0] ^= 0x80;
+        assert!(!verify_node_registration(&node, &session, &invalid_tag, &key).unwrap());
+        assert!(!verify_node_registration(&node, "not-a-session", &[0; 32], &key).unwrap());
+    }
+
+    #[test]
+    fn heartbeat_tag_binds_node_session_sequence_and_memory() {
+        let key = [0x52; 32];
+        let session = uuid::Uuid::new_v4().to_string();
+        let tag = sign_node_heartbeat(
+            CONTROL_VERSION,
+            "stable-node",
+            &session,
+            7,
+            12_345,
+            &key,
+        )
+        .unwrap();
+
+        assert!(verify_node_heartbeat(
+            CONTROL_VERSION,
+            "stable-node",
+            &session,
+            7,
+            12_345,
+            &tag,
+            &key
+        ).unwrap());
+        assert!(!verify_node_heartbeat(
+            CONTROL_VERSION,
+            "stable-node",
+            &session,
+            8,
+            12_345,
+            &tag,
+            &key
+        ).unwrap());
+        assert!(!verify_node_heartbeat(
+            CONTROL_VERSION,
+            "stable-node",
+            &session,
+            7,
+            12_346,
+            &tag,
+            &key
+        ).unwrap());
+        assert!(!verify_node_heartbeat(
+            CONTROL_VERSION,
+            "other-node",
+            &session,
+            7,
+            12_345,
+            &tag,
+            &key
+        ).unwrap());
     }
 
     #[test]
