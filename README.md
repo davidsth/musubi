@@ -22,7 +22,7 @@ Start the manager on one machine:
 
 Open the read-only cluster dashboard at http://127.0.0.1:9003. The HTTP listener binds to localhost by default. To view it from another trusted LAN machine, explicitly set `--dashboard-bind 0.0.0.0:9003` and allow TCP port 9003 through the manager firewall. Do not expose the dashboard to the public internet.
 
-The dashboard polls `/api/cluster` every two seconds and displays registered nodes, online/offline state, CPU model/core count, total and available RAM, accelerator inventory, node address, and heartbeat age. It has no workload-control or remote-execution endpoints.
+The dashboard polls `/api/cluster` every two seconds and displays registered nodes, online/offline state, CPU model/core count, total RAM, schedulable RAM after AITP leases, reserved bytes, accelerator inventory, node address, and heartbeat age. It has no workload-control or remote-execution endpoints.
 
 The manager accepts node registrations and periodic heartbeats. It prints a cluster inventory and marks nodes OFFLINE when no heartbeat has arrived within the configured timeout.
 
@@ -230,7 +230,7 @@ The v0.9 dashboard also shows valid tensor manifests found in the dashboard host
 - The authenticated tensor receiver stages completed payloads to disk and publishes a SHA-256 manifest. v0.10 adds a verified streaming file handle for runtime adapters, but there is not yet a tensor allocator, mmap-backed adapter, model loader, or inference execution path. Verification occurs when the handle is opened; keep the local tensor store trusted and do not modify a payload while a runtime is consuming its open handle. The dashboard's artifact catalog is local to the manager host and does not aggregate remote worker stores.
 - The GGUF v0.11 inspector reads bounded model metadata and tensor descriptors only. It is not a GGUF loader; unsupported tensor type sizes are left unknown, and big-endian GGUF is rejected.
 - GGUF transfer descriptors currently describe contiguous GGML tensor storage only; arbitrary tensor views/strides, dequantization, and runtime operation compatibility are not implemented.
-- No inference-runtime integration, GPU-direct networking, RDMA, or zero-copy path. The v0.14 placement planner is advisory only; it does not allocate workloads or load models on workers.
+- No inference-runtime integration, GPU-direct networking, RDMA, or zero-copy path. The v0.14 planner remains an advisory weight-placement estimate; v0.16 adds expiring logical RAM leases only. Leases do not pin OS memory, transfer weights, or load models.
 - Hardware inventory includes CPU model, OS, architecture, logical CPU count, total RAM, periodically refreshed available RAM, and best-effort accelerator names/vendors/memory. NVIDIA VRAM is reported when nvidia-smi is installed. Apple Silicon is represented as an integrated GPU sharing unified system memory. Some platform probes identify devices without reliable VRAM data. Compute capability, utilization, and measured throughput are not yet reported.
 
 ## Roadmap
@@ -248,13 +248,13 @@ The v0.9 dashboard also shows valid tensor manifests found in the dashboard host
 11. Add exact GGML storage/stride coverage for common K-quants and IQ formats, then validate tensor mapping against llama.cpp. (Descriptor mapping and synthetic file-range tests added in v0.13; runtime decoding remains unverified.)
 12. Integrate llama.cpp on CPU first and execute a remote layer on a worker.
 13. Implement pipeline partitioning: place contiguous transformer layer ranges on workers, transfer activations, and stream generated tokens.
-14. Add automatic memory-aware placement, then GPU/Metal/CUDA acceleration and performance tuning. (Initial CPU-RAM-only dry-run planner added in v0.14; live allocation and runtime-aware memory sizing remain future work.)
+14. Add automatic memory-aware placement, then GPU/Metal/CUDA acceleration and performance tuning. (CPU-RAM dry-run planning added in v0.14; authenticated, expiring logical reservations added in v0.16. Runtime-aware memory sizing and actual allocation remain future work.)
 15. Add congestion control and end-to-end benchmarking. (Manager registration and heartbeat HMAC authentication were added in v0.15; the shared key is not encryption or per-node identity.)
 16. Add a cluster dashboard for live node inventory. (Initial read-only dashboard added in v0.7; local tensor catalog added in v0.9; local GGUF catalog added in v0.11.)
 
 ## Authenticated manager membership v0.15
 
-The cluster manager now requires AITP_CLUSTER_KEY. A node started with --manager also requires the same key. Registration signs the complete node announcement and a fresh UUID process-session ID; heartbeats sign the node ID, session ID, sequence number, and available-memory value. The manager accepts heartbeats only for the currently registered session and only when the sequence increases. The control-plane schema is version 7; older agents must be upgraded together.
+The cluster manager now requires AITP_CLUSTER_KEY. A node started with --manager also requires the same key. Registration signs the complete node announcement and a fresh UUID process-session ID; heartbeats sign the node ID, session ID, sequence number, raw available-memory value, and active logical-reservation total. The manager accepts heartbeats only for the currently registered session and only when the sequence increases. The control-plane schema is version 8; older agents must be upgraded together.
 
 macOS/Linux:
 
@@ -270,9 +270,40 @@ Windows PowerShell (set the same secret on the manager and every node):
 
 Discovery requests and announcements remain unauthenticated so nodes can be found before joining a managed cluster. They expose metadata only and do not authorize registration or workload actions. The shared key is a cluster-wide trust boundary: it is not encryption, does not create distinct per-node credentials, and should be protected like a password. No remote command or arbitrary code execution endpoint is exposed.
 
+## Live logical memory leases v0.16
+
+The `plan-gguf` command remains a dry-run planner. v0.16 adds a separate, explicit operator step that asks each selected worker to hold a **short-lived logical RAM reservation** for its assigned tensor bytes. This is admission/accounting state in the worker process, not an OS memory allocation and not a model deployment.
+
+Create a fresh plan from the current manager snapshot, so the plan contains the currently registered worker process-session IDs:
+
+    curl http://127.0.0.1:9003/api/cluster --output cluster.json
+    cargo run --release -- plan-gguf \
+      --model ./aitp-models/model.gguf \
+      --nodes cluster.json \
+      --reserve-percent 20 \
+      --output model-placement.json
+
+Acquire the reservations (the default lease is 120 seconds; the allowed range is 1–300 seconds):
+
+    cargo run --release -- reserve-plan \
+      --plan model-placement.json \
+      --model ./aitp-models/model.gguf \
+      --output model-lease.json \
+      --ttl-secs 120
+
+Release them early:
+
+    cargo run --release -- release-lease --lease model-lease.json
+
+Run these commands with the same `AITP_CLUSTER_KEY` used by the manager and worker agents. The coordinator re-inspects the exact GGUF metadata, streams a SHA-256 hash of the model file, then sends authenticated prepare requests directly to the selected workers' control-plane UDP endpoints. Workers validate the target node ID and process-session ID, expiry, replay state, and current unreserved system RAM. The manager dashboard and subsequent plans show schedulable RAM after the reserved total is subtracted.
+
+The coordinator writes the lease record with create-new semantics before contacting workers. It attempts to release all targets if any prepare is rejected or times out. When rollback cannot be confirmed, it retains the record and prints the `release-lease` recovery command. A lease also expires automatically; a worker restart clears that worker's in-memory reservations and changes its process-session ID, so make a fresh cluster snapshot and placement after restarts.
+
+This feature intentionally does **not** pin or allocate physical memory, transfer GGUF weights, execute code, or load a llama.cpp context. It is a bounded coordination primitive to prevent cooperating AITP planners from intentionally overcommitting the same reported RAM; it cannot stop unrelated processes from consuming memory after a lease is granted. Worker lease state is in-memory. The small control-plane messages use bounded retries, but they still run over UDP and are not a production reliable or congestion-controlled transport. Anyone with the shared cluster key can request or release reservations; there is no per-user authorization or per-node credential system.
+
 ## Security
 
-The manager's UDP registration and heartbeat messages, tensor offers, and authenticated tensor payload datagrams use HMAC-SHA256 with the shared environment-provided key; this provides integrity/authentication but not confidentiality. Discovery announcements and the legacy generic send/receive path remain unauthenticated metadata/compatibility paths. The HTTP dashboard is read-only but has no authentication or TLS; keep its default localhost bind unless using a trusted isolated LAN. The receiver enforces a 1 GiB per-tensor ceiling and writes to bounded temporary files. Do not expose these services to the public internet.
+The manager's UDP registration and heartbeat messages, allocation-lease requests/replies, tensor offers, and authenticated tensor payload datagrams use HMAC-SHA256 with the shared environment-provided key; this provides integrity/authentication but not confidentiality. Discovery announcements and the legacy generic send/receive path remain unauthenticated metadata/compatibility paths. The HTTP dashboard is read-only but has no authentication or TLS; keep its default localhost bind unless using a trusted isolated LAN. The receiver enforces a 1 GiB per-tensor ceiling and writes to bounded temporary files. Do not expose these services to the public internet.
 
 ## License
 
