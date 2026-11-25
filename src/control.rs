@@ -3,7 +3,7 @@
 use crate::tensor::TensorDescriptor;
 use serde::{Deserialize, Serialize};
 
-pub const CONTROL_VERSION: u8 = 7;
+pub const CONTROL_VERSION: u8 = 8;
 pub const MAX_CONTROL_DATAGRAM: usize = 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,9 +33,24 @@ pub enum ControlMessage {
         /// Must match the authenticated registration's process session.
         session_id: String,
         sequence: u64,
+        /// Raw OS-reported available RAM before logical AITP reservations.
         available_memory_bytes: u64,
-        /// HMAC-SHA256 over the heartbeat fields.
+        /// Sum of active, unexpired AITP memory-reservation leases.
+        reserved_memory_bytes: u64,
+        /// HMAC-SHA256 over all heartbeat fields.
         auth_tag: Vec<u8>,
+    },
+    AllocationPrepare {
+        request: AllocationPrepare,
+    },
+    AllocationReply {
+        reply: AllocationReply,
+    },
+    AllocationRelease {
+        request: AllocationRelease,
+    },
+    AllocationReleaseReply {
+        reply: AllocationReleaseReply,
     },
 }
 
@@ -59,6 +74,57 @@ pub struct TensorOfferReply {
     pub tensor_id: u32,
     pub accepted: bool,
     pub reason: Option<String>,
+    pub auth_tag: Vec<u8>,
+}
+
+/// Authenticated request to reserve logical RAM for a contiguous GGUF layer range.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AllocationPrepare {
+    pub version: u8,
+    pub coordinator_node_id: String,
+    pub target_node_id: String,
+    pub target_session_id: String,
+    pub lease_id: String,
+    pub model_sha256: String,
+    pub first_layer: Option<u64>,
+    pub end_layer_exclusive: Option<u64>,
+    pub reserved_bytes: u64,
+    pub expires_at_unix: u64,
+    pub auth_tag: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AllocationReply {
+    pub version: u8,
+    pub coordinator_node_id: String,
+    pub node_id: String,
+    pub session_id: String,
+    pub lease_id: String,
+    pub accepted: bool,
+    pub reason: Option<String>,
+    pub reserved_bytes: u64,
+    pub expires_at_unix: u64,
+    pub auth_tag: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AllocationRelease {
+    pub version: u8,
+    pub coordinator_node_id: String,
+    pub target_node_id: String,
+    pub target_session_id: String,
+    pub lease_id: String,
+    pub auth_tag: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AllocationReleaseReply {
+    pub version: u8,
+    pub coordinator_node_id: String,
+    pub node_id: String,
+    pub session_id: String,
+    pub lease_id: String,
+    pub released: bool,
     pub auth_tag: Vec<u8>,
 }
 
@@ -139,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn discovery_and_registration_round_trip() {
+    fn discovery_registration_and_heartbeat_round_trip() {
         let node = sample_node();
         assert!(node.is_valid());
 
@@ -163,6 +229,7 @@ mod tests {
                 session_id,
                 sequence: 1,
                 available_memory_bytes: 8 * 1024 * 1024 * 1024,
+                reserved_memory_bytes: 1024,
                 auth_tag: vec![8; 32],
             },
         ] {
@@ -208,6 +275,65 @@ mod tests {
         let encoded = serde_json::to_vec(&ControlMessage::TensorOfferReply { reply }).unwrap();
         assert!(encoded.len() <= MAX_CONTROL_DATAGRAM);
         let _: ControlMessage = serde_json::from_slice(&encoded).unwrap();
+    }
+
+    #[test]
+    fn allocation_control_messages_fit_the_control_datagram() {
+        let request = AllocationPrepare {
+            version: CONTROL_VERSION,
+            coordinator_node_id: "00000000-0000-4000-8000-000000000001".into(),
+            target_node_id: "00000000-0000-4000-8000-000000000002".into(),
+            target_session_id: "00000000-0000-4000-8000-000000000003".into(),
+            lease_id: "00000000-0000-4000-8000-000000000004".into(),
+            model_sha256: "a".repeat(64),
+            first_layer: Some(0),
+            end_layer_exclusive: Some(8),
+            reserved_bytes: 1024 * 1024,
+            expires_at_unix: 1_800_000_000,
+            auth_tag: vec![9; 32],
+        };
+        let reply = AllocationReply {
+            version: CONTROL_VERSION,
+            coordinator_node_id: request.coordinator_node_id.clone(),
+            node_id: request.target_node_id.clone(),
+            session_id: request.target_session_id.clone(),
+            lease_id: request.lease_id.clone(),
+            accepted: true,
+            reason: None,
+            reserved_bytes: request.reserved_bytes,
+            expires_at_unix: request.expires_at_unix,
+            auth_tag: vec![10; 32],
+        };
+        let release = AllocationRelease {
+            version: CONTROL_VERSION,
+            coordinator_node_id: request.coordinator_node_id.clone(),
+            target_node_id: request.target_node_id.clone(),
+            target_session_id: request.target_session_id.clone(),
+            lease_id: request.lease_id.clone(),
+            auth_tag: vec![11; 32],
+        };
+        let release_reply = AllocationReleaseReply {
+            version: CONTROL_VERSION,
+            coordinator_node_id: request.coordinator_node_id,
+            node_id: request.target_node_id,
+            session_id: request.target_session_id,
+            lease_id: request.lease_id,
+            released: true,
+            auth_tag: vec![12; 32],
+        };
+
+        for message in [
+            ControlMessage::AllocationPrepare { request },
+            ControlMessage::AllocationReply { reply },
+            ControlMessage::AllocationRelease { request: release },
+            ControlMessage::AllocationReleaseReply {
+                reply: release_reply,
+            },
+        ] {
+            let encoded = serde_json::to_vec(&message).unwrap();
+            assert!(encoded.len() <= MAX_CONTROL_DATAGRAM);
+            let _: ControlMessage = serde_json::from_slice(&encoded).unwrap();
+        }
     }
 
     #[test]
