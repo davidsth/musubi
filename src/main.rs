@@ -983,6 +983,7 @@ async fn run_node(
     let socket = UdpSocket::bind(bind).await?;
     let node_id = persistent_node_id()?;
     let offer_admission = Arc::new(Mutex::new(OfferAdmission::default()));
+    let allocation_book = Arc::new(Mutex::new(allocation::NodeAllocationBook::default()));
     if let Some(key) = cluster_key.clone() {
         let data_bind = SocketAddr::new(bind.ip(), data_port);
         let data_socket = UdpSocket::bind(data_bind)
@@ -1098,12 +1099,14 @@ async fn run_node(
                 let key = cluster_key
                     .as_deref()
                     .context("managed-cluster heartbeat requires AITP_CLUSTER_KEY")?;
+                let reserved_memory_bytes = allocation_book.lock().await.reserved_bytes();
                 let auth_tag = auth::sign_node_heartbeat(
                     CONTROL_VERSION,
                     &node_id,
                     &session_id,
                     sequence,
                     available_memory_bytes,
+                    reserved_memory_bytes,
                     key,
                 )?;
                 let message = ControlMessage::Heartbeat {
@@ -1112,6 +1115,7 @@ async fn run_node(
                     session_id: session_id.clone(),
                     sequence,
                     available_memory_bytes,
+                    reserved_memory_bytes,
                     auth_tag,
                 };
                 let encoded = serde_json::to_vec(&message)?;
@@ -1124,7 +1128,7 @@ async fn run_node(
             }
             _ = offer_reap.tick() => {
                 offer_admission.lock().await.expire(Instant::now());
-
+                allocation_book.lock().await.expire(Instant::now());
             }
             received = socket.recv_from(&mut buf) => {
                 let (n, peer) = received?;
@@ -1172,6 +1176,69 @@ async fn run_node(
                             );
                         }
                     }
+                    ControlMessage::AllocationPrepare { request } => {
+                        let (Some(key), true) = (cluster_key.as_deref(), manager.is_some()) else {
+                            continue;
+                        };
+                        system.refresh_memory();
+                        let available_memory_bytes = system.available_memory().min(total_memory_bytes);
+                        let result = allocation_book.lock().await.prepare(
+                            &request,
+                            &node_id,
+                            &session_id,
+                            key,
+                            available_memory_bytes,
+                            Instant::now(),
+                            allocation::unix_now()?,
+                        );
+                        let accepted = result.is_ok();
+                        let reason = result.err().map(str::to_string);
+                        let mut reply = AllocationReply {
+                            version: CONTROL_VERSION,
+                            coordinator_node_id: request.coordinator_node_id.clone(),
+                            node_id: node_id.clone(),
+                            session_id: session_id.clone(),
+                            lease_id: request.lease_id.clone(),
+                            accepted,
+                            reason,
+                            reserved_bytes: request.reserved_bytes,
+                            expires_at_unix: request.expires_at_unix,
+                            auth_tag: Vec::new(),
+                        };
+                        if auth::sign_allocation_reply(&mut reply, key).is_ok() {
+                            let response = serde_json::to_vec(&ControlMessage::AllocationReply { reply })?;
+                            if response.len() <= MAX_CONTROL_DATAGRAM {
+                                socket.send_to(&response, peer).await?;
+                            }
+                        }
+                    }
+                    ControlMessage::AllocationRelease { request } => {
+                        let (Some(key), true) = (cluster_key.as_deref(), manager.is_some()) else {
+                            continue;
+                        };
+                        let released = allocation_book.lock().await.release(
+                            &request,
+                            &node_id,
+                            &session_id,
+                            key,
+                            Instant::now(),
+                        ).unwrap_or(false);
+                        let mut reply = AllocationReleaseReply {
+                            version: CONTROL_VERSION,
+                            coordinator_node_id: request.coordinator_node_id.clone(),
+                            node_id: node_id.clone(),
+                            session_id: session_id.clone(),
+                            lease_id: request.lease_id.clone(),
+                            released,
+                            auth_tag: Vec::new(),
+                        };
+                        if auth::sign_allocation_release_reply(&mut reply, key).is_ok() {
+                            let response = serde_json::to_vec(&ControlMessage::AllocationReleaseReply { reply })?;
+                            if response.len() <= MAX_CONTROL_DATAGRAM {
+                                socket.send_to(&response, peer).await?;
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -1186,6 +1253,7 @@ struct ManagedNode {
     last_seen: Instant,
     last_sequence: u64,
     session_id: String,
+    reserved_memory_bytes: u64,
 }
 
 async fn run_manager(
@@ -1247,12 +1315,15 @@ async fn run_manager(
                         node_id: id.clone(),
                         hostname: node.announcement.hostname.clone(),
                         address: node.address.to_string(),
+                        session_id: node.session_id.clone(),
                         os: node.announcement.os.clone(),
                         arch: node.announcement.arch.clone(),
                         cpu_model: node.announcement.cpu_model.clone(),
                         logical_cpus: node.announcement.logical_cpus,
                         total_memory_bytes: node.announcement.total_memory_bytes,
-                        available_memory_bytes: node.announcement.available_memory_bytes,
+                        available_memory_bytes: node.announcement.available_memory_bytes
+                            .saturating_sub(node.reserved_memory_bytes),
+                        reserved_memory_bytes: node.reserved_memory_bytes,
                         accelerators: node.announcement.accelerators.clone(),
                         online,
                         last_seen_secs: age.as_secs(),
@@ -1293,6 +1364,7 @@ async fn run_manager(
                                 last_seen: Instant::now(),
                                 last_sequence: 0,
                                 session_id,
+                                reserved_memory_bytes: 0,
                             });
                             println!(
                                 "{} authenticated node registration: {} from {}",
@@ -1308,6 +1380,7 @@ async fn run_manager(
                         session_id,
                         sequence,
                         available_memory_bytes,
+                        reserved_memory_bytes,
                         auth_tag,
                     } => {
                         if auth::verify_node_heartbeat(
@@ -1316,6 +1389,7 @@ async fn run_manager(
                             &session_id,
                             sequence,
                             available_memory_bytes,
+                            reserved_memory_bytes,
                             &auth_tag,
                             &cluster_key,
                         )? {
@@ -1326,6 +1400,7 @@ async fn run_manager(
                                     node.address = peer;
                                     node.announcement.available_memory_bytes = available_memory_bytes
                                         .min(node.announcement.total_memory_bytes);
+                                    node.reserved_memory_bytes = reserved_memory_bytes;
                                 }
                             }
                         }
