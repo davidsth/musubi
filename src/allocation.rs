@@ -251,7 +251,9 @@ pub fn load_placement_plan(path: &Path) -> Result<PlacementPlan> {
 fn validate_plan(plan: &PlacementPlan) -> Result<()> {
     if plan.schema_version != 1
         || plan.layer_count == 0
+        || plan.layer_count > 4096
         || plan.model_tensor_bytes == 0
+        || plan.non_layer_tensor_bytes > plan.model_tensor_bytes
         || plan.model_filename.is_empty()
         || plan.model_filename.len() > 512
         || plan.model_filename.contains('/')
@@ -266,6 +268,8 @@ fn validate_plan(plan: &PlacementPlan) -> Result<()> {
     let mut node_ids = HashSet::new();
     let mut ranges = Vec::new();
     let mut assigned_bytes = 0u128;
+    let mut assigned_layer_bytes = 0u128;
+    let mut assigned_non_layer_bytes = 0u128;
     let mut used_nodes = 0usize;
 
     for node in &plan.node_assignments {
@@ -279,6 +283,8 @@ fn validate_plan(plan: &PlacementPlan) -> Result<()> {
 
         used_nodes += 1;
         if node.usable_memory_bytes == 0
+            || node.available_memory_bytes > node.total_memory_bytes
+            || node.usable_memory_bytes > node.available_memory_bytes
             || node.assigned_weight_bytes > node.usable_memory_bytes
             || node.layer_weight_bytes
                 .checked_add(node.non_layer_tensor_bytes)
@@ -323,13 +329,22 @@ fn validate_plan(plan: &PlacementPlan) -> Result<()> {
         assigned_bytes = assigned_bytes
             .checked_add(node.assigned_weight_bytes as u128)
             .context("placement plan assigned-byte total overflow")?;
+        assigned_layer_bytes = assigned_layer_bytes
+            .checked_add(node.layer_weight_bytes as u128)
+            .context("placement plan layer-byte total overflow")?;
+        assigned_non_layer_bytes = assigned_non_layer_bytes
+            .checked_add(node.non_layer_tensor_bytes as u128)
+            .context("placement plan non-layer-byte total overflow")?;
     }
 
     if used_nodes == 0 || used_nodes != plan.used_nodes {
         bail!("placement plan used-node count does not match its assignments");
     }
-    if assigned_bytes != plan.model_tensor_bytes as u128 {
-        bail!("placement plan assignments do not cover the complete GGUF tensor byte total");
+    if assigned_bytes != plan.model_tensor_bytes as u128
+        || assigned_layer_bytes != (plan.model_tensor_bytes - plan.non_layer_tensor_bytes) as u128
+        || assigned_non_layer_bytes != plan.non_layer_tensor_bytes as u128
+    {
+        bail!("placement plan assignments do not match the complete GGUF layer and non-layer byte totals");
     }
 
     ranges.sort_unstable();
@@ -472,7 +487,7 @@ pub fn validate_lease_record(record: &AllocationLeaseRecord) -> Result<()> {
             bail!("allocation lease record contains an unusable target address");
         }
         match (target.first_layer, target.end_layer_exclusive) {
-            (Some(start), Some(end)) if start < end => {}
+            (Some(start), Some(end)) if start < end && end <= 4096 => {}
             (None, None) => {}
             _ => bail!("allocation lease record contains an invalid layer range"),
         }
@@ -522,6 +537,58 @@ mod tests {
         };
         sign_allocation_release(&mut request, key).unwrap();
         request
+    }
+
+    #[test]
+    fn placement_plan_preserves_fresh_worker_session_and_checks_layer_cover() {
+        let plan = PlacementPlan {
+            schema_version: 1,
+            model_filename: "model.gguf".into(),
+            architecture: Some("llama".into()),
+            file_bytes: 2048,
+            layer_count: 1,
+            tensor_count: 2,
+            model_tensor_bytes: 1024,
+            non_layer_tensor_bytes: 128,
+            non_layer_tensor_count: 1,
+            reserve_percent: 20,
+            target_max_utilization_percent: 50.0,
+            online_nodes_considered: 1,
+            offline_nodes_ignored: 0,
+            zero_capacity_nodes_ignored: 0,
+            used_nodes: 1,
+            node_assignments: vec![crate::planner::NodePlacement {
+                node_id: "00000000-0000-4000-8000-000000000002".into(),
+                hostname: "worker".into(),
+                address: "127.0.0.1:9001".into(),
+                session_id: Some("00000000-0000-4000-8000-000000000003".into()),
+                total_memory_bytes: 4096,
+                available_memory_bytes: 2048,
+                usable_memory_bytes: 1800,
+                non_layer_tensor_bytes: 128,
+                first_layer: Some(0),
+                end_layer_exclusive: Some(1),
+                layer_count: 1,
+                layer_weight_bytes: 896,
+                assigned_weight_bytes: 1024,
+                utilization_percent: 56.8,
+            }],
+            caveats: Vec::new(),
+        };
+        let targets = targets_from_plan(&plan).unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(
+            targets[0].node_session_id,
+            "00000000-0000-4000-8000-000000000003"
+        );
+
+        let mut stale = plan.clone();
+        stale.node_assignments[0].session_id = None;
+        assert!(targets_from_plan(&stale).is_err());
+
+        let mut incomplete = plan;
+        incomplete.node_assignments[0].end_layer_exclusive = Some(2);
+        assert!(targets_from_plan(&incomplete).is_err());
     }
 
     #[test]
