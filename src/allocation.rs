@@ -286,11 +286,15 @@ fn validate_plan(plan: &PlacementPlan) -> Result<()> {
             || node.available_memory_bytes > node.total_memory_bytes
             || node.usable_memory_bytes > node.available_memory_bytes
             || node.assigned_weight_bytes > node.usable_memory_bytes
-            || node.layer_weight_bytes
+            || node
+                .layer_weight_bytes
                 .checked_add(node.non_layer_tensor_bytes)
                 != Some(node.assigned_weight_bytes)
         {
-            bail!("node '{}' has an invalid assigned memory total", node.node_id);
+            bail!(
+                "node '{}' has an invalid assigned memory total",
+                node.node_id
+            );
         }
 
         let session_id = node.session_id.as_deref().context(
@@ -306,7 +310,10 @@ fn validate_plan(plan: &PlacementPlan) -> Result<()> {
             )
         })?;
         if address.port() == 0 || address.ip().is_unspecified() {
-            bail!("node '{}' has an unusable control-plane address", node.node_id);
+            bail!(
+                "node '{}' has an unusable control-plane address",
+                node.node_id
+            );
         }
 
         match (node.first_layer, node.end_layer_exclusive) {
@@ -361,9 +368,7 @@ fn validate_plan(plan: &PlacementPlan) -> Result<()> {
     Ok(())
 }
 
-pub fn targets_from_plan(
-    plan: &PlacementPlan,
-) -> Result<Vec<AllocationLeaseTarget>> {
+pub fn targets_from_plan(plan: &PlacementPlan) -> Result<Vec<AllocationLeaseTarget>> {
     validate_plan(plan)?;
     let mut targets = Vec::new();
     for node in &plan.node_assignments {
@@ -387,11 +392,7 @@ pub fn targets_from_plan(
 
 /// Hash the exact model file referenced by a placement. It is streamed in a
 /// fixed 1 MiB buffer; no model-sized allocation is made.
-pub fn sha256_model(
-    path: &Path,
-    expected_bytes: u64,
-    expected_filename: &str,
-) -> Result<String> {
+pub fn sha256_model(path: &Path, expected_bytes: u64, expected_filename: &str) -> Result<String> {
     let metadata = fs::symlink_metadata(path)
         .with_context(|| format!("inspecting GGUF model {}", path.display()))?;
     if !metadata.file_type().is_file()
@@ -503,12 +504,7 @@ mod tests {
         control::{AllocationPrepare, AllocationRelease, CONTROL_VERSION},
     };
 
-    fn signed_prepare(
-        key: &[u8],
-        lease_id: &str,
-        bytes: u64,
-        expiry: u64,
-    ) -> AllocationPrepare {
+    fn signed_prepare(key: &[u8], lease_id: &str, bytes: u64, expiry: u64) -> AllocationPrepare {
         let mut request = AllocationPrepare {
             version: CONTROL_VERSION,
             coordinator_node_id: "00000000-0000-4000-8000-000000000001".into(),
@@ -595,12 +591,7 @@ mod tests {
     fn admits_and_accounts_for_authenticated_memory_leases() {
         let key = [0x45; 32];
         let now = Instant::now();
-        let request = signed_prepare(
-            &key,
-            "00000000-0000-4000-8000-000000000004",
-            512,
-            10_120,
-        );
+        let request = signed_prepare(&key, "00000000-0000-4000-8000-000000000004", 512, 10_120);
         let mut book = NodeAllocationBook::default();
         book.prepare(
             &request,
@@ -620,12 +611,7 @@ mod tests {
     fn duplicate_prepare_is_idempotent_but_does_not_double_reserve() {
         let key = [0x46; 32];
         let now = Instant::now();
-        let request = signed_prepare(
-            &key,
-            "00000000-0000-4000-8000-000000000005",
-            512,
-            10_120,
-        );
+        let request = signed_prepare(&key, "00000000-0000-4000-8000-000000000005", 512, 10_120);
         let mut book = NodeAllocationBook::default();
         for _ in 0..2 {
             book.prepare(
@@ -647,12 +633,7 @@ mod tests {
     fn rejects_wrong_session_and_overcommitted_memory() {
         let key = [0x47; 32];
         let now = Instant::now();
-        let request = signed_prepare(
-            &key,
-            "00000000-0000-4000-8000-000000000006",
-            512,
-            10_120,
-        );
+        let request = signed_prepare(&key, "00000000-0000-4000-8000-000000000006", 512, 10_120);
         let mut book = NodeAllocationBook::default();
         assert!(book
             .prepare(
@@ -683,12 +664,7 @@ mod tests {
     fn expires_leases_and_rejects_stale_requests() {
         let key = [0x48; 32];
         let now = Instant::now();
-        let request = signed_prepare(
-            &key,
-            "00000000-0000-4000-8000-000000000007",
-            256,
-            10_010,
-        );
+        let request = signed_prepare(&key, "00000000-0000-4000-8000-000000000007", 256, 10_010);
         let mut book = NodeAllocationBook::default();
         book.prepare(
             &request,
