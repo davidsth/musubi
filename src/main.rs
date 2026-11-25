@@ -454,7 +454,7 @@ async fn exchange_allocation_message(
         socket.send_to(&encoded, target).await?;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
         while tokio::time::Instant::now() < deadline {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let remaining = deadline - tokio::time::Instant::now();
             match timeout(remaining, socket.recv_from(&mut buffer)).await {
                 Ok(Ok((length, peer))) if peer == target && length > 0 => {
                     if let Ok(response) =
