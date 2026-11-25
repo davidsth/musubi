@@ -856,10 +856,7 @@ async fn lease_status(lease_path: PathBuf) -> Result<()> {
             }
             Err(error) => {
                 unreachable += 1;
-                println!(
-                    "UNREACHABLE: {} at {} | {error:#}",
-                    target.node_id, address
-                );
+                println!("UNREACHABLE: {} at {} | {error:#}", target.node_id, address);
             }
         }
     }

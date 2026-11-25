@@ -538,9 +538,7 @@ mod tests {
     use super::*;
     use crate::{
         auth::{sign_allocation_prepare, sign_allocation_release},
-        control::{
-            AllocationPrepare, AllocationRelease, AllocationStatusRequest, CONTROL_VERSION,
-        },
+        control::{AllocationPrepare, AllocationRelease, AllocationStatusRequest, CONTROL_VERSION},
     };
 
     fn signed_prepare(key: &[u8], lease_id: &str, bytes: u64, expiry: u64) -> AllocationPrepare {
@@ -671,11 +669,7 @@ mod tests {
             (true, 256, 10_120)
         );
 
-        let stale = signed_status(
-            &key,
-            lease_id,
-            "00000000-0000-4000-8000-000000000099",
-        );
+        let stale = signed_status(&key, lease_id, "00000000-0000-4000-8000-000000000099");
         assert_eq!(
             book.status(
                 &stale,

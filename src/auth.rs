@@ -499,10 +499,7 @@ fn valid_allocation_status(request: &AllocationStatusRequest) -> bool {
         && valid_allocation_uuid(&request.request_id)
 }
 
-fn allocation_status_mac(
-    key: &[u8],
-    request: &AllocationStatusRequest,
-) -> Result<HmacSha256> {
+fn allocation_status_mac(key: &[u8], request: &AllocationStatusRequest) -> Result<HmacSha256> {
     let mut mac = new_mac(key, b"AITP/ALLOCATION_STATUS/V1\0")?;
     mac.update(&[request.version]);
     update_blob(&mut mac, request.coordinator_node_id.as_bytes());
@@ -547,10 +544,7 @@ fn valid_allocation_status_reply(reply: &AllocationStatusReply) -> bool {
         })
 }
 
-fn allocation_status_reply_mac(
-    key: &[u8],
-    reply: &AllocationStatusReply,
-) -> Result<HmacSha256> {
+fn allocation_status_reply_mac(key: &[u8], reply: &AllocationStatusReply) -> Result<HmacSha256> {
     let mut mac = new_mac(key, b"AITP/ALLOCATION_STATUS_REPLY/V1\0")?;
     mac.update(&[reply.version]);
     update_blob(&mut mac, reply.coordinator_node_id.as_bytes());
@@ -575,10 +569,7 @@ pub fn sign_allocation_status_reply(reply: &mut AllocationStatusReply, key: &[u8
     Ok(())
 }
 
-pub fn verify_allocation_status_reply(
-    reply: &AllocationStatusReply,
-    key: &[u8],
-) -> Result<bool> {
+pub fn verify_allocation_status_reply(reply: &AllocationStatusReply, key: &[u8]) -> Result<bool> {
     if reply.auth_tag.len() != HMAC_TAG_BYTES || !valid_allocation_status_reply(reply) {
         return Ok(false);
     }
