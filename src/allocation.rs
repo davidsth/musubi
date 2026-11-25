@@ -633,6 +633,7 @@ mod tests {
             target_node_id: "00000000-0000-4000-8000-000000000002".into(),
             target_session_id: session_id.into(),
             lease_id: lease_id.into(),
+            request_id: "00000000-0000-4000-8000-000000000010".into(),
             auth_tag: Vec::new(),
         };
         auth::sign_allocation_status(&mut request, key).unwrap();

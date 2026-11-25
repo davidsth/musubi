@@ -309,7 +309,7 @@ This feature intentionally does **not** pin or allocate physical memory, transfe
 
 ## Authenticated lease status v0.17
 
-The `lease-status` command queries every target in a saved lease record and verifies a signed status reply from each worker. Replies bind the coordinator, node, current worker process session, lease ID, active flag, reserved byte count, and expiry. A worker restarted since planning reports its new session and an inactive lease, which helps identify stale records after process restarts. Unreachable workers are reported separately; their leases expire automatically within the configured TTL. Status queries are read-only and do not renew, release, or recreate reservations. The control-plane schema is version 9; upgrade the manager and all workers together.
+The `lease-status` command queries every target in a saved lease record and verifies a signed status reply from each worker. Replies bind the coordinator, node, current worker process session, lease ID, a fresh per-query UUID, active flag, reserved byte count, and expiry. The UUID prevents a captured response from satisfying a later status query. A worker restarted since planning reports its new session and an inactive lease, which helps identify stale records after process restarts. Unreachable workers are reported separately; their leases expire automatically within the configured TTL. Status queries are read-only and do not renew, release, or recreate reservations. The control-plane schema is version 9; upgrade the manager and all workers together.
 
 ## Security
 

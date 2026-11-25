@@ -564,6 +564,7 @@ async fn send_allocation_status(
     if reply.coordinator_node_id != request.coordinator_node_id
         || reply.node_id != request.target_node_id
         || reply.lease_id != request.lease_id
+        || reply.request_id != request.request_id
     {
         bail!("node {target} returned allocation status for a different request");
     }
@@ -821,6 +822,7 @@ async fn lease_status(lease_path: PathBuf) -> Result<()> {
             target_node_id: target.node_id.clone(),
             target_session_id: target.node_session_id.clone(),
             lease_id: record.lease_id.clone(),
+            request_id: uuid::Uuid::new_v4().to_string(),
             auth_tag: Vec::new(),
         };
 
@@ -1717,6 +1719,7 @@ async fn run_node(
                             node_id: node_id.clone(),
                             session_id: session_id.clone(),
                             lease_id: request.lease_id.clone(),
+                            request_id: request.request_id.clone(),
                             active,
                             reserved_bytes,
                             expires_at_unix,

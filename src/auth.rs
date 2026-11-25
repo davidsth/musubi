@@ -496,6 +496,7 @@ fn valid_allocation_status(request: &AllocationStatusRequest) -> bool {
         && valid_allocation_uuid(&request.target_node_id)
         && valid_allocation_uuid(&request.target_session_id)
         && valid_allocation_uuid(&request.lease_id)
+        && valid_allocation_uuid(&request.request_id)
 }
 
 fn allocation_status_mac(
@@ -508,6 +509,7 @@ fn allocation_status_mac(
     update_blob(&mut mac, request.target_node_id.as_bytes());
     update_blob(&mut mac, request.target_session_id.as_bytes());
     update_blob(&mut mac, request.lease_id.as_bytes());
+    update_blob(&mut mac, request.request_id.as_bytes());
     Ok(mac)
 }
 
@@ -537,6 +539,7 @@ fn valid_allocation_status_reply(reply: &AllocationStatusReply) -> bool {
         && valid_allocation_uuid(&reply.node_id)
         && valid_allocation_uuid(&reply.session_id)
         && valid_allocation_uuid(&reply.lease_id)
+        && valid_allocation_uuid(&reply.request_id)
         && if reply.active {
             reply.reserved_bytes > 0 && reply.expires_at_unix > 0
         } else {
@@ -554,6 +557,7 @@ fn allocation_status_reply_mac(
     update_blob(&mut mac, reply.node_id.as_bytes());
     update_blob(&mut mac, reply.session_id.as_bytes());
     update_blob(&mut mac, reply.lease_id.as_bytes());
+    update_blob(&mut mac, reply.request_id.as_bytes());
     mac.update(&[u8::from(reply.active)]);
     mac.update(&reply.reserved_bytes.to_be_bytes());
     mac.update(&reply.expires_at_unix.to_be_bytes());
@@ -830,11 +834,15 @@ mod tests {
             target_node_id: "00000000-0000-4000-8000-000000000002".into(),
             target_session_id: "00000000-0000-4000-8000-000000000003".into(),
             lease_id: "00000000-0000-4000-8000-000000000004".into(),
+            request_id: "00000000-0000-4000-8000-000000000005".into(),
             auth_tag: Vec::new(),
         };
         sign_allocation_status(&mut request, &key).unwrap();
         assert!(verify_allocation_status(&request, &key).unwrap());
-        request.lease_id = "00000000-0000-4000-8000-000000000005".into();
+        request.request_id = "00000000-0000-4000-8000-000000000006".into();
+        assert!(!verify_allocation_status(&request, &key).unwrap());
+        request.request_id = "00000000-0000-4000-8000-000000000005".into();
+        request.lease_id = "00000000-0000-4000-8000-000000000007".into();
         assert!(!verify_allocation_status(&request, &key).unwrap());
 
         let mut reply = AllocationStatusReply {
@@ -843,6 +851,7 @@ mod tests {
             node_id: "00000000-0000-4000-8000-000000000002".into(),
             session_id: "00000000-0000-4000-8000-000000000003".into(),
             lease_id: "00000000-0000-4000-8000-000000000004".into(),
+            request_id: "00000000-0000-4000-8000-000000000005".into(),
             active: true,
             reserved_bytes: 4096,
             expires_at_unix: 1_800_000_000,
@@ -850,6 +859,9 @@ mod tests {
         };
         sign_allocation_status_reply(&mut reply, &key).unwrap();
         assert!(verify_allocation_status_reply(&reply, &key).unwrap());
+        let mut replayed = reply.clone();
+        replayed.request_id = "00000000-0000-4000-8000-000000000006".into();
+        assert!(!verify_allocation_status_reply(&replayed, &key).unwrap());
         reply.reserved_bytes += 1;
         assert!(!verify_allocation_status_reply(&reply, &key).unwrap());
 

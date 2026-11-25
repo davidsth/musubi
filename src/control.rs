@@ -142,6 +142,8 @@ pub struct AllocationStatusRequest {
     pub target_node_id: String,
     pub target_session_id: String,
     pub lease_id: String,
+    /// Fresh UUID to bind the response to this query and prevent stale reply replay.
+    pub request_id: String,
     pub auth_tag: Vec<u8>,
 }
 
@@ -153,6 +155,8 @@ pub struct AllocationStatusReply {
     /// Current worker process session, which may differ from the recorded target session.
     pub session_id: String,
     pub lease_id: String,
+    /// Echo of the query UUID, authenticated to prevent replayed status replies.
+    pub request_id: String,
     pub active: bool,
     /// Zero when the lease is not active on this process session.
     pub reserved_bytes: u64,
@@ -377,6 +381,7 @@ mod tests {
             target_node_id: "00000000-0000-4000-8000-000000000002".into(),
             target_session_id: "00000000-0000-4000-8000-000000000003".into(),
             lease_id: "00000000-0000-4000-8000-000000000004".into(),
+            request_id: "00000000-0000-4000-8000-000000000005".into(),
             auth_tag: vec![1; 32],
         };
         let reply = AllocationStatusReply {
@@ -385,6 +390,7 @@ mod tests {
             node_id: request.target_node_id.clone(),
             session_id: request.target_session_id.clone(),
             lease_id: request.lease_id.clone(),
+            request_id: request.request_id.clone(),
             active: true,
             reserved_bytes: 1024 * 1024,
             expires_at_unix: 1_800_000_000,
