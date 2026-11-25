@@ -6,7 +6,7 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
 use crate::control::{
-    AllocationPrepare, AllocationReply, AllocationRelease, AllocationReleaseReply,
+    AllocationPrepare, AllocationRelease, AllocationReleaseReply, AllocationReply,
     NodeAnnouncement, TensorOfferMessage, TensorOfferReply, CONTROL_VERSION,
 };
 
@@ -458,10 +458,7 @@ fn valid_allocation_release_reply(reply: &AllocationReleaseReply) -> bool {
         && valid_allocation_uuid(&reply.lease_id)
 }
 
-fn allocation_release_reply_mac(
-    key: &[u8],
-    reply: &AllocationReleaseReply,
-) -> Result<HmacSha256> {
+fn allocation_release_reply_mac(key: &[u8], reply: &AllocationReleaseReply) -> Result<HmacSha256> {
     let mut mac = new_mac(key, b"AITP/ALLOCATION_RELEASE_REPLY/V1\0")?;
     mac.update(&[reply.version]);
     update_blob(&mut mac, reply.coordinator_node_id.as_bytes());
@@ -472,10 +469,7 @@ fn allocation_release_reply_mac(
     Ok(mac)
 }
 
-pub fn sign_allocation_release_reply(
-    reply: &mut AllocationReleaseReply,
-    key: &[u8],
-) -> Result<()> {
+pub fn sign_allocation_release_reply(reply: &mut AllocationReleaseReply, key: &[u8]) -> Result<()> {
     if !valid_allocation_release_reply(reply) {
         bail!("invalid allocation release reply fields");
     }
@@ -486,10 +480,7 @@ pub fn sign_allocation_release_reply(
     Ok(())
 }
 
-pub fn verify_allocation_release_reply(
-    reply: &AllocationReleaseReply,
-    key: &[u8],
-) -> Result<bool> {
+pub fn verify_allocation_release_reply(reply: &AllocationReleaseReply, key: &[u8]) -> Result<bool> {
     if reply.auth_tag.len() != HMAC_TAG_BYTES || !valid_allocation_release_reply(reply) {
         return Ok(false);
     }
@@ -581,9 +572,16 @@ mod tests {
     fn heartbeat_tag_binds_node_session_sequence_and_memory() {
         let key = [0x52; 32];
         let session = uuid::Uuid::new_v4().to_string();
-        let tag =
-            sign_node_heartbeat(CONTROL_VERSION, "stable-node", &session, 7, 12_345, 256, &key)
-                .unwrap();
+        let tag = sign_node_heartbeat(
+            CONTROL_VERSION,
+            "stable-node",
+            &session,
+            7,
+            12_345,
+            256,
+            &key,
+        )
+        .unwrap();
 
         assert!(verify_node_heartbeat(
             CONTROL_VERSION,
