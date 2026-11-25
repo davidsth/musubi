@@ -431,6 +431,333 @@ fn plan_gguf(
     Ok(())
 }
 
+async fn exchange_allocation_message(
+    target: SocketAddr,
+    message: &ControlMessage,
+) -> Result<ControlMessage> {
+    let encoded = serde_json::to_vec(message)?;
+    if encoded.is_empty() || encoded.len() > MAX_CONTROL_DATAGRAM {
+        bail!("allocation control message exceeds the control-plane datagram limit");
+    }
+
+    let bind = if target.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    };
+    let socket = UdpSocket::bind(bind).await?;
+    let mut buffer = [0u8; MAX_CONTROL_DATAGRAM];
+
+    // These bounded retries are for small control messages only. They are not
+    // a data-plane transport or a congestion-control mechanism.
+    for _ in 0..3 {
+        socket.send_to(&encoded, target).await?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        while tokio::time::Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match timeout(remaining, socket.recv_from(&mut buffer)).await {
+                Ok(Ok((length, peer))) if peer == target && length > 0 => {
+                    if let Ok(response) =
+                        serde_json::from_slice::<ControlMessage>(&buffer[..length])
+                    {
+                        return Ok(response);
+                    }
+                }
+                Ok(Ok(_)) => continue,
+                Ok(Err(error)) => return Err(error.into()),
+                Err(_) => break,
+            }
+        }
+    }
+    bail!("timed out waiting for an authenticated allocation response from {target}")
+}
+
+async fn send_allocation_prepare(
+    target: SocketAddr,
+    mut request: AllocationPrepare,
+    key: &[u8],
+) -> Result<AllocationReply> {
+    auth::sign_allocation_prepare(&mut request, key)?;
+    let response = exchange_allocation_message(
+        target,
+        &ControlMessage::AllocationPrepare {
+            request: request.clone(),
+        },
+    )
+    .await?;
+    let ControlMessage::AllocationReply { reply } = response else {
+        bail!("node {target} returned an unexpected allocation response");
+    };
+    if !auth::verify_allocation_reply(&reply, key)? {
+        bail!("node {target} returned an invalid allocation response signature");
+    }
+    if reply.coordinator_node_id != request.coordinator_node_id
+        || reply.node_id != request.target_node_id
+        || reply.session_id != request.target_session_id
+        || reply.lease_id != request.lease_id
+        || reply.reserved_bytes != request.reserved_bytes
+        || reply.expires_at_unix != request.expires_at_unix
+    {
+        bail!("node {target} returned an allocation response for a different request");
+    }
+    Ok(reply)
+}
+
+async fn send_allocation_release(
+    target: SocketAddr,
+    mut request: AllocationRelease,
+    key: &[u8],
+) -> Result<()> {
+    auth::sign_allocation_release(&mut request, key)?;
+    let response = exchange_allocation_message(
+        target,
+        &ControlMessage::AllocationRelease {
+            request: request.clone(),
+        },
+    )
+    .await?;
+    let ControlMessage::AllocationReleaseReply { reply } = response else {
+        bail!("node {target} returned an unexpected release response");
+    };
+    if !auth::verify_allocation_release_reply(&reply, key)? {
+        bail!("node {target} returned an invalid release response signature");
+    }
+    if reply.coordinator_node_id != request.coordinator_node_id
+        || reply.node_id != request.target_node_id
+        || reply.session_id != request.target_session_id
+        || reply.lease_id != request.lease_id
+        || !reply.released
+    {
+        bail!("node {target} did not confirm release of lease {}", request.lease_id);
+    }
+    Ok(())
+}
+
+fn write_lease_record(
+    path: &std::path::Path,
+    record: &allocation::AllocationLeaseRecord,
+) -> Result<()> {
+    allocation::validate_lease_record(record)?;
+    let encoded = serde_json::to_vec_pretty(record)?;
+    if encoded.len() as u64 > allocation::MAX_LEASE_FILE_BYTES {
+        bail!("allocation lease record exceeds the configured file-size limit");
+    }
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .with_context(|| {
+            format!(
+                "creating allocation lease {} without overwriting an existing file",
+                path.display()
+            )
+        })?;
+    if let Err(error) = file
+        .write_all(&encoded)
+        .and_then(|_| file.write_all(b"\n"))
+        .and_then(|_| file.sync_all())
+    {
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(error).with_context(|| format!("writing allocation lease {}", path.display()));
+    }
+    Ok(())
+}
+
+async fn release_targets(
+    targets: &[allocation::AllocationLeaseTarget],
+    coordinator_node_id: &str,
+    lease_id: &str,
+    key: &[u8],
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    for target in targets {
+        let address = match target.address.parse::<SocketAddr>() {
+            Ok(address) => address,
+            Err(error) => {
+                failures.push(format!("{}: invalid address: {error}", target.node_id));
+                continue;
+            }
+        };
+        let request = AllocationRelease {
+            version: CONTROL_VERSION,
+            coordinator_node_id: coordinator_node_id.to_owned(),
+            target_node_id: target.node_id.clone(),
+            target_session_id: target.node_session_id.clone(),
+            lease_id: lease_id.to_owned(),
+            auth_tag: Vec::new(),
+        };
+        if let Err(error) = send_allocation_release(address, request, key).await {
+            failures.push(format!("{} at {}: {error:#}", target.node_id, address));
+        }
+    }
+    failures
+}
+
+async fn reserve_plan(
+    plan_path: PathBuf,
+    model_path: PathBuf,
+    output_path: PathBuf,
+    ttl_secs: u64,
+) -> Result<()> {
+    if ttl_secs == 0 || ttl_secs > allocation::MAX_LEASE_TTL_SECS {
+        bail!(
+            "--ttl-secs must be between 1 and {} seconds",
+            allocation::MAX_LEASE_TTL_SECS
+        );
+    }
+    let key = auth::cluster_key_from_env()?
+        .context("set AITP_CLUSTER_KEY to the same 32+ byte cluster secret used by the workers")?;
+    let plan = allocation::load_placement_plan(&plan_path)?;
+    let targets = allocation::targets_from_plan(&plan)?;
+
+    // Reinspect the model before reserving anything so a stale or mismatched
+    // placement file cannot reserve RAM for a different GGUF artifact.
+    let inspected = gguf::inspect_file(&model_path)
+        .with_context(|| format!("inspecting GGUF model {}", model_path.display()))?;
+    if inspected.filename != plan.model_filename
+        || inspected.file_bytes != plan.file_bytes
+        || inspected.layer_count != Some(plan.layer_count)
+        || inspected.tensor_count != plan.tensor_count
+        || inspected.known_tensor_bytes != plan.model_tensor_bytes
+        || inspected.unsupported_tensor_count != 0
+        || inspected.architecture != plan.architecture
+    {
+        bail!("GGUF model metadata no longer matches the supplied placement plan");
+    }
+    let model_sha256 =
+        allocation::sha256_model(&model_path, plan.file_bytes, &plan.model_filename)?;
+
+    let created_at_unix = allocation::unix_now()?;
+    let expires_at_unix = created_at_unix
+        .checked_add(ttl_secs)
+        .context("allocation lease expiry timestamp overflow")?;
+    let coordinator_node_id = persistent_node_id()?;
+    let lease_id = uuid::Uuid::new_v4().to_string();
+    let record = allocation::AllocationLeaseRecord {
+        schema_version: 1,
+        lease_id: lease_id.clone(),
+        coordinator_node_id: coordinator_node_id.clone(),
+        model_filename: plan.model_filename.clone(),
+        model_sha256: model_sha256.clone(),
+        created_at_unix,
+        expires_at_unix,
+        targets: targets.clone(),
+    };
+
+    // Persist the recovery instructions before contacting workers. If a reply
+    // is lost and rollback also fails, release-lease can still retry cleanup.
+    write_lease_record(&output_path, &record)?;
+
+    let mut failure = None;
+    for target in &targets {
+        let address: SocketAddr = target
+            .address
+            .parse()
+            .with_context(|| format!("invalid address for node {}", target.node_id))?;
+        let request = AllocationPrepare {
+            version: CONTROL_VERSION,
+            coordinator_node_id: coordinator_node_id.clone(),
+            target_node_id: target.node_id.clone(),
+            target_session_id: target.node_session_id.clone(),
+            lease_id: lease_id.clone(),
+            model_sha256: model_sha256.clone(),
+            first_layer: target.first_layer,
+            end_layer_exclusive: target.end_layer_exclusive,
+            reserved_bytes: target.reserved_bytes,
+            expires_at_unix,
+            auth_tag: Vec::new(),
+        };
+
+        match send_allocation_prepare(address, request, &key).await {
+            Ok(reply) if reply.accepted => {
+                println!(
+                    "Reserved {:.2} GiB on node {} for layers {:?}..{:?}.",
+                    target.reserved_bytes as f64 / 1024.0_f64.powi(3),
+                    target.node_id,
+                    target.first_layer,
+                    target.end_layer_exclusive
+                );
+            }
+            Ok(reply) => {
+                failure = Some(format!(
+                    "node {} rejected the reservation: {}",
+                    target.node_id,
+                    reply.reason.as_deref().unwrap_or("no reason supplied")
+                ));
+                break;
+            }
+            Err(error) => {
+                failure = Some(format!("node {} at {}: {error:#}", target.node_id, address));
+                break;
+            }
+        }
+    }
+
+    if let Some(reason) = failure {
+        let cleanup_failures =
+            release_targets(&targets, &coordinator_node_id, &lease_id, &key).await;
+        if cleanup_failures.is_empty() {
+            std::fs::remove_file(&output_path).with_context(|| {
+                format!(
+                    "removing aborted allocation lease {} after successful rollback",
+                    output_path.display()
+                )
+            })?;
+            bail!("allocation aborted: {reason}; all worker reservations were rolled back");
+        }
+        bail!(
+            "allocation aborted: {reason}; rollback was incomplete: {}. The recovery lease was kept at {}; retry with aitp release-lease --lease {}",
+            cleanup_failures.join("; "),
+            output_path.display(),
+            output_path.display()
+        );
+    }
+
+    println!(
+        "Allocation lease {} active for {} worker(s), {} seconds.",
+        lease_id,
+        targets.len(),
+        ttl_secs
+    );
+    println!("Lease record: {}", output_path.display());
+    println!(
+        "GGUF SHA-256: {}. This is a logical memory reservation only; no weights were transferred or loaded.",
+        model_sha256
+    );
+    Ok(())
+}
+
+async fn release_lease(lease_path: PathBuf) -> Result<()> {
+    let key = auth::cluster_key_from_env()?
+        .context("set AITP_CLUSTER_KEY to the same 32+ byte cluster secret used by the workers")?;
+    let record = allocation::load_lease_record(&lease_path)?;
+    let failures = release_targets(
+        &record.targets,
+        &record.coordinator_node_id,
+        &record.lease_id,
+        &key,
+    )
+    .await;
+
+    if !failures.is_empty() {
+        bail!(
+            "could not confirm release on every worker; the lease record was kept for retry: {}",
+            failures.join("; ")
+        );
+    }
+    std::fs::remove_file(&lease_path)
+        .with_context(|| format!("removing released lease record {}", lease_path.display()))?;
+    println!(
+        "Released lease {} on all {} worker(s) and removed {}.",
+        record.lease_id,
+        record.targets.len(),
+        lease_path.display()
+    );
+    Ok(())
+}
+
 fn inspect_gguf(input: PathBuf, tensor_limit: usize) -> Result<()> {
     if tensor_limit > 128 {
         bail!("--tensor-limit may not exceed 128");
