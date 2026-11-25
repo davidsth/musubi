@@ -24,12 +24,16 @@ pub struct DashboardNode {
     pub node_id: String,
     pub hostname: String,
     pub address: String,
+    /// Authenticated worker process-session UUID used to reject stale plans.
+    pub session_id: String,
     pub os: String,
     pub arch: String,
     pub cpu_model: String,
     pub logical_cpus: usize,
     pub total_memory_bytes: u64,
+    /// Raw OS-available RAM minus current AITP logical reservations.
     pub available_memory_bytes: u64,
+    pub reserved_memory_bytes: u64,
     pub accelerators: Vec<crate::control::AcceleratorInfo>,
     pub online: bool,
     pub last_seen_secs: u64,
