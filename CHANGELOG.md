@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.16.0 — Add authenticated, expiring logical memory leases
+
+- Bumped the JSON control-plane schema to version 8; the fixed 32-byte tensor data-plane header and payload framing are unchanged.
+- Added HMAC-SHA256 allocation prepare/reply/release messages bound to the coordinator, target node, target process session, lease ID, GGUF SHA-256, layer range, byte count, and expiry.
+- Added a bounded worker-side lease book with 1–300 second TTLs, idempotent prepare/release, current-session checks, available-RAM admission, expiration, and replay tombstones.
+- Extended authenticated heartbeats with active reserved-memory totals; the manager dashboard and GGUF planner now report/use schedulable RAM after subtracting those reservations.
+- Added `reserve-plan` and `release-lease` CLI commands. The coordinator rechecks GGUF metadata, hashes the exact model file, persists recovery information before contacting workers, and attempts rollback if any worker rejects or times out.
+- Placement plans now carry the authenticated worker process-session IDs; stale plans are rejected by the lease command.
+- Added allocation message size, HMAC field-binding, lease accounting, idempotence, expiry, session-mismatch, overcommit, and replay tests.
+- Reservations are logical accounting only: no OS memory is pinned, no model weights are moved or loaded, and no inference work is executed. Manager inventory and worker leases remain in-memory.
+- No change to the binary tensor data plane, no arbitrary remote execution, and no claim of UDP congestion control or production reliability.
+
 ## v0.15.0 — Authenticate cluster-manager membership
 
 - Bumped the JSON control-plane schema to version 7; the fixed 32-byte tensor data-plane header is unchanged.
