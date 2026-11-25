@@ -15,9 +15,8 @@ mod worker;
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use control::{
-    AllocationPrepare, AllocationRelease, AllocationReply, AllocationReleaseReply,
-    ControlMessage, NodeAnnouncement, TensorOfferMessage, TensorOfferReply, CONTROL_VERSION,
-    MAX_CONTROL_DATAGRAM,
+    AllocationPrepare, AllocationRelease, AllocationReleaseReply, AllocationReply, ControlMessage,
+    NodeAnnouncement, TensorOfferMessage, TensorOfferReply, CONTROL_VERSION, MAX_CONTROL_DATAGRAM,
 };
 use protocol::*;
 use std::{
@@ -528,7 +527,10 @@ async fn send_allocation_release(
         || reply.lease_id != request.lease_id
         || !reply.released
     {
-        bail!("node {target} did not confirm release of lease {}", request.lease_id);
+        bail!(
+            "node {target} did not confirm release of lease {}",
+            request.lease_id
+        );
     }
     Ok(())
 }
