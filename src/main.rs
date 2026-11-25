@@ -1,3 +1,4 @@
+mod allocation;
 mod auth;
 mod control;
 mod dashboard;
@@ -14,6 +15,7 @@ mod worker;
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use control::{
+    AllocationPrepare, AllocationRelease, AllocationReply, AllocationReleaseReply,
     ControlMessage, NodeAnnouncement, TensorOfferMessage, TensorOfferReply, CONTROL_VERSION,
     MAX_CONTROL_DATAGRAM,
 };
@@ -170,6 +172,26 @@ enum Command {
         #[arg(long)]
         output: Option<PathBuf>,
     },
+    /// Acquire short-lived logical RAM leases for every node in a GGUF placement plan.
+    ReservePlan {
+        /// JSON output from plan-gguf.
+        #[arg(long)]
+        plan: PathBuf,
+        /// Exact GGUF model file used to produce the placement.
+        #[arg(long)]
+        model: PathBuf,
+        /// New path for the lease record; an existing file is never overwritten.
+        #[arg(long)]
+        output: PathBuf,
+        /// Lease time-to-live in seconds (1–300).
+        #[arg(long, default_value_t = allocation::DEFAULT_LEASE_TTL_SECS)]
+        ttl_secs: u64,
+    },
+    /// Release all node reservations recorded in a lease file.
+    ReleaseLease {
+        #[arg(long)]
+        lease: PathBuf,
+    },
     /// Run a cluster manager that authenticates node registrations and heartbeats.
     Manager {
         #[arg(long, default_value = "0.0.0.0:9002")]
@@ -235,6 +257,13 @@ async fn main() -> Result<()> {
             reserve_percent,
             output,
         } => plan_gguf(model, nodes, reserve_percent, output),
+        Command::ReservePlan {
+            plan,
+            model,
+            output,
+            ttl_secs,
+        } => reserve_plan(plan, model, output, ttl_secs).await,
+        Command::ReleaseLease { lease } => release_lease(lease).await,
         Command::Manager {
             bind,
             timeout_ms,
