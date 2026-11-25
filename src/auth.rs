@@ -582,7 +582,8 @@ mod tests {
         let key = [0x52; 32];
         let session = uuid::Uuid::new_v4().to_string();
         let tag =
-            sign_node_heartbeat(CONTROL_VERSION, "stable-node", &session, 7, 12_345, &key).unwrap();
+            sign_node_heartbeat(CONTROL_VERSION, "stable-node", &session, 7, 12_345, 256, &key)
+                .unwrap();
 
         assert!(verify_node_heartbeat(
             CONTROL_VERSION,
@@ -619,11 +620,22 @@ mod tests {
         .unwrap());
         assert!(!verify_node_heartbeat(
             CONTROL_VERSION,
-            "other-node",
+            "stable-node",
             &session,
             7,
             12_345,
             257,
+            &tag,
+            &key
+        )
+        .unwrap());
+        assert!(!verify_node_heartbeat(
+            CONTROL_VERSION,
+            "other-node",
+            &session,
+            7,
+            12_345,
+            256,
             &tag,
             &key
         )
