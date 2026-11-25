@@ -584,8 +584,7 @@ mod tests {
         let inventory = vec![node("a", 100, true), node("b", 100, true)];
         let plan = create_plan(&model, &inventory, 0).unwrap();
         assert!(plan.node_assignments.iter().all(|assignment| {
-            assignment.session_id.as_deref()
-                == Some("00000000-0000-4000-8000-000000000042")
+            assignment.session_id.as_deref() == Some("00000000-0000-4000-8000-000000000042")
         }));
 
         let mut next_layer = 0u64;
