@@ -314,10 +314,10 @@ mod tests {
         };
         let release_reply = AllocationReleaseReply {
             version: CONTROL_VERSION,
-            coordinator_node_id: request.coordinator_node_id,
-            node_id: request.target_node_id,
-            session_id: request.target_session_id,
-            lease_id: request.lease_id,
+            coordinator_node_id: request.coordinator_node_id.clone(),
+            node_id: request.target_node_id.clone(),
+            session_id: request.target_session_id.clone(),
+            lease_id: request.lease_id.clone(),
             released: true,
             auth_tag: vec![12; 32],
         };
