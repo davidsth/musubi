@@ -27,6 +27,9 @@ pub struct PlannerNode {
     pub hostname: String,
     #[serde(default)]
     pub address: String,
+    /// Current authenticated process session, required for live reservations.
+    #[serde(default)]
+    pub session_id: Option<String>,
     pub total_memory_bytes: u64,
     pub available_memory_bytes: u64,
     #[serde(default = "default_online")]
@@ -79,11 +82,14 @@ pub fn load_nodes(path: &Path) -> Result<Vec<PlannerNode>> {
     Ok(nodes)
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodePlacement {
     pub node_id: String,
     pub hostname: String,
     pub address: String,
+    /// Current worker process session observed in the manager snapshot.
+    #[serde(default)]
+    pub session_id: Option<String>,
     pub total_memory_bytes: u64,
     pub available_memory_bytes: u64,
     /// Available RAM after the requested reserve is withheld.
@@ -100,7 +106,7 @@ pub struct NodePlacement {
     pub utilization_percent: f64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlacementPlan {
     pub schema_version: u8,
     pub model_filename: String,
@@ -296,6 +302,7 @@ pub fn create_plan(
             node_id: capacity.node.node_id.clone(),
             hostname: capacity.node.hostname.clone(),
             address: capacity.node.address.clone(),
+            session_id: capacity.node.session_id.clone(),
             total_memory_bytes: capacity.node.total_memory_bytes,
             available_memory_bytes: capacity.node.available_memory_bytes,
             usable_memory_bytes: capacity.usable_memory_bytes,
@@ -564,6 +571,7 @@ mod tests {
             node_id: id.into(),
             hostname: format!("host-{id}"),
             address: format!("192.0.2.{}:9001", id.len() + 1),
+            session_id: Some("00000000-0000-4000-8000-000000000042".into()),
             total_memory_bytes: available_memory_bytes.saturating_mul(2),
             available_memory_bytes,
             online,
@@ -659,6 +667,7 @@ mod tests {
                 "node_id": "stable-node",
                 "hostname": "mini",
                 "address": "192.0.2.10:9001",
+                "session_id": "00000000-0000-4000-8000-000000000042",
                 "total_memory_bytes": 16_000_000_000u64,
                 "available_memory_bytes": 8_000_000_000u64,
                 "online": true,
