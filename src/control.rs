@@ -3,7 +3,7 @@
 use crate::tensor::TensorDescriptor;
 use serde::{Deserialize, Serialize};
 
-pub const CONTROL_VERSION: u8 = 8;
+pub const CONTROL_VERSION: u8 = 9;
 pub const MAX_CONTROL_DATAGRAM: usize = 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +51,12 @@ pub enum ControlMessage {
     },
     AllocationReleaseReply {
         reply: AllocationReleaseReply,
+    },
+    AllocationStatus {
+        request: AllocationStatusRequest,
+    },
+    AllocationStatusReply {
+        reply: AllocationStatusReply,
     },
 }
 
@@ -125,6 +131,33 @@ pub struct AllocationReleaseReply {
     pub session_id: String,
     pub lease_id: String,
     pub released: bool,
+    pub auth_tag: Vec<u8>,
+}
+
+/// Authenticated read-only query for the state of one logical allocation lease.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AllocationStatusRequest {
+    pub version: u8,
+    pub coordinator_node_id: String,
+    pub target_node_id: String,
+    pub target_session_id: String,
+    pub lease_id: String,
+    pub auth_tag: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AllocationStatusReply {
+    pub version: u8,
+    pub coordinator_node_id: String,
+    pub node_id: String,
+    /// Current worker process session, which may differ from the recorded target session.
+    pub session_id: String,
+    pub lease_id: String,
+    pub active: bool,
+    /// Zero when the lease is not active on this process session.
+    pub reserved_bytes: u64,
+    /// Zero when the lease is not active on this process session.
+    pub expires_at_unix: u64,
     pub auth_tag: Vec<u8>,
 }
 
@@ -329,6 +362,37 @@ mod tests {
             ControlMessage::AllocationReleaseReply {
                 reply: release_reply,
             },
+        ] {
+            let encoded = serde_json::to_vec(&message).unwrap();
+            assert!(encoded.len() <= MAX_CONTROL_DATAGRAM);
+            let _: ControlMessage = serde_json::from_slice(&encoded).unwrap();
+        }
+    }
+
+    #[test]
+    fn allocation_status_messages_fit_the_control_datagram() {
+        let request = AllocationStatusRequest {
+            version: CONTROL_VERSION,
+            coordinator_node_id: "00000000-0000-4000-8000-000000000001".into(),
+            target_node_id: "00000000-0000-4000-8000-000000000002".into(),
+            target_session_id: "00000000-0000-4000-8000-000000000003".into(),
+            lease_id: "00000000-0000-4000-8000-000000000004".into(),
+            auth_tag: vec![1; 32],
+        };
+        let reply = AllocationStatusReply {
+            version: CONTROL_VERSION,
+            coordinator_node_id: request.coordinator_node_id.clone(),
+            node_id: request.target_node_id.clone(),
+            session_id: request.target_session_id.clone(),
+            lease_id: request.lease_id.clone(),
+            active: true,
+            reserved_bytes: 1024 * 1024,
+            expires_at_unix: 1_800_000_000,
+            auth_tag: vec![2; 32],
+        };
+        for message in [
+            ControlMessage::AllocationStatus { request },
+            ControlMessage::AllocationStatusReply { reply },
         ] {
             let encoded = serde_json::to_vec(&message).unwrap();
             assert!(encoded.len() <= MAX_CONTROL_DATAGRAM);

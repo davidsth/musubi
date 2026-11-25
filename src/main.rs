@@ -15,8 +15,9 @@ mod worker;
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use control::{
-    AllocationPrepare, AllocationRelease, AllocationReleaseReply, AllocationReply, ControlMessage,
-    NodeAnnouncement, TensorOfferMessage, TensorOfferReply, CONTROL_VERSION, MAX_CONTROL_DATAGRAM,
+    AllocationPrepare, AllocationRelease, AllocationReleaseReply, AllocationReply,
+    AllocationStatusReply, AllocationStatusRequest, ControlMessage, NodeAnnouncement,
+    TensorOfferMessage, TensorOfferReply, CONTROL_VERSION, MAX_CONTROL_DATAGRAM,
 };
 use protocol::*;
 use std::{
@@ -191,6 +192,11 @@ enum Command {
         #[arg(long)]
         lease: PathBuf,
     },
+    /// Query each worker for the live state of a recorded allocation lease.
+    LeaseStatus {
+        #[arg(long)]
+        lease: PathBuf,
+    },
     /// Run a cluster manager that authenticates node registrations and heartbeats.
     Manager {
         #[arg(long, default_value = "0.0.0.0:9002")]
@@ -263,6 +269,7 @@ async fn main() -> Result<()> {
             ttl_secs,
         } => reserve_plan(plan, model, output, ttl_secs).await,
         Command::ReleaseLease { lease } => release_lease(lease).await,
+        Command::LeaseStatus { lease } => lease_status(lease).await,
         Command::Manager {
             bind,
             timeout_ms,
@@ -535,6 +542,37 @@ async fn send_allocation_release(
     Ok(())
 }
 
+async fn send_allocation_status(
+    target: SocketAddr,
+    mut request: AllocationStatusRequest,
+    key: &[u8],
+) -> Result<AllocationStatusReply> {
+    auth::sign_allocation_status(&mut request, key)?;
+    let response = exchange_allocation_message(
+        target,
+        &ControlMessage::AllocationStatus {
+            request: request.clone(),
+        },
+    )
+    .await?;
+    let ControlMessage::AllocationStatusReply { reply } = response else {
+        bail!("node {target} returned an unexpected allocation status response");
+    };
+    if !auth::verify_allocation_status_reply(&reply, key)? {
+        bail!("node {target} returned an invalid allocation status signature");
+    }
+    if reply.coordinator_node_id != request.coordinator_node_id
+        || reply.node_id != request.target_node_id
+        || reply.lease_id != request.lease_id
+    {
+        bail!("node {target} returned allocation status for a different request");
+    }
+    if reply.active && reply.session_id != request.target_session_id {
+        bail!("node {target} reported a lease active for a different process session");
+    }
+    Ok(reply)
+}
+
 fn write_lease_record(
     path: &std::path::Path,
     record: &allocation::AllocationLeaseRecord,
@@ -756,6 +794,76 @@ async fn release_lease(lease_path: PathBuf) -> Result<()> {
         record.lease_id,
         record.targets.len(),
         lease_path.display()
+    );
+    Ok(())
+}
+
+async fn lease_status(lease_path: PathBuf) -> Result<()> {
+    let key = auth::cluster_key_from_env()?
+        .context("set AITP_CLUSTER_KEY to the same 32+ byte cluster secret used by the workers")?;
+    let record = allocation::load_lease_record(&lease_path)?;
+    let mut active = 0usize;
+    let mut inactive = 0usize;
+    let mut unreachable = 0usize;
+
+    println!(
+        "Lease {} | model {} | expires at Unix {}",
+        record.lease_id, record.model_filename, record.expires_at_unix
+    );
+    for target in &record.targets {
+        let address: SocketAddr = target
+            .address
+            .parse()
+            .with_context(|| format!("invalid address for node {}", target.node_id))?;
+        let request = AllocationStatusRequest {
+            version: CONTROL_VERSION,
+            coordinator_node_id: record.coordinator_node_id.clone(),
+            target_node_id: target.node_id.clone(),
+            target_session_id: target.node_session_id.clone(),
+            lease_id: record.lease_id.clone(),
+            auth_tag: Vec::new(),
+        };
+
+        match send_allocation_status(address, request, &key).await {
+            Ok(reply) => {
+                let session_matches = reply.session_id == target.node_session_id;
+                let reservation_matches = reply.reserved_bytes == target.reserved_bytes
+                    && reply.expires_at_unix == record.expires_at_unix;
+                let confirmed_active = reply.active && session_matches && reservation_matches;
+                let state = if !session_matches {
+                    "STALE SESSION"
+                } else if confirmed_active {
+                    "ACTIVE"
+                } else if reply.active {
+                    "MISMATCH"
+                } else {
+                    "INACTIVE"
+                };
+                if confirmed_active {
+                    active += 1;
+                } else {
+                    inactive += 1;
+                }
+                println!(
+                    "{state}: {} at {} | {:.2} GiB reserved | session {}",
+                    target.node_id,
+                    address,
+                    reply.reserved_bytes as f64 / 1024.0_f64.powi(3),
+                    reply.session_id
+                );
+            }
+            Err(error) => {
+                unreachable += 1;
+                println!(
+                    "UNREACHABLE: {} at {} | {error:#}",
+                    target.node_id, address
+                );
+            }
+        }
+    }
+
+    println!(
+        "Lease status summary: {active} active, {inactive} inactive or mismatched, {unreachable} unreachable."
     );
     Ok(())
 }
@@ -1580,7 +1688,57 @@ async fn run_node(
                             }
                         }
                     }
+                    ControlMessage::AllocationStatus { request } => {
+                        if manager.is_none() {
+                            continue;
+                        }
+                        let Some(key) = cluster_key.as_deref() else {
+                            continue;
+                        };
+                        if !auth::verify_allocation_status(&request, key).unwrap_or(false)
+                            || request.target_node_id != node_id
+                        {
+                            continue;
+                        }
+                        let (active, reserved_bytes, expires_at_unix) = allocation_book
+                            .lock()
+                            .await
+                            .status(
+                                &request,
+                                &node_id,
+                                &session_id,
+                                key,
+                                Instant::now(),
+                            )
+                            .unwrap_or((false, 0, 0));
+                        let mut reply = AllocationStatusReply {
+                            version: CONTROL_VERSION,
+                            coordinator_node_id: request.coordinator_node_id.clone(),
+                            node_id: node_id.clone(),
+                            session_id: session_id.clone(),
+                            lease_id: request.lease_id.clone(),
+                            active,
+                            reserved_bytes,
+                            expires_at_unix,
+                            auth_tag: Vec::new(),
+                        };
+                        if auth::sign_allocation_status_reply(&mut reply, key).is_ok() {
+                            let response =
+                                serde_json::to_vec(&ControlMessage::AllocationStatusReply { reply })?;
+                            if response.len() <= MAX_CONTROL_DATAGRAM {
+                                socket.send_to(&response, peer).await?;
+                            }
+                        }
+                    }
                     _ => {}
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ManagedNode {                    _ => {}
                 }
             }
         }

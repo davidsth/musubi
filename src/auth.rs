@@ -7,7 +7,8 @@ use sha2::Sha256;
 
 use crate::control::{
     AllocationPrepare, AllocationRelease, AllocationReleaseReply, AllocationReply,
-    NodeAnnouncement, TensorOfferMessage, TensorOfferReply, CONTROL_VERSION,
+    AllocationStatusReply, AllocationStatusRequest, NodeAnnouncement, TensorOfferMessage,
+    TensorOfferReply, CONTROL_VERSION,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -489,6 +490,99 @@ pub fn verify_allocation_release_reply(reply: &AllocationReleaseReply, key: &[u8
         .is_ok())
 }
 
+fn valid_allocation_status(request: &AllocationStatusRequest) -> bool {
+    request.version == CONTROL_VERSION
+        && valid_allocation_uuid(&request.coordinator_node_id)
+        && valid_allocation_uuid(&request.target_node_id)
+        && valid_allocation_uuid(&request.target_session_id)
+        && valid_allocation_uuid(&request.lease_id)
+}
+
+fn allocation_status_mac(
+    key: &[u8],
+    request: &AllocationStatusRequest,
+) -> Result<HmacSha256> {
+    let mut mac = new_mac(key, b"AITP/ALLOCATION_STATUS/V1\0")?;
+    mac.update(&[request.version]);
+    update_blob(&mut mac, request.coordinator_node_id.as_bytes());
+    update_blob(&mut mac, request.target_node_id.as_bytes());
+    update_blob(&mut mac, request.target_session_id.as_bytes());
+    update_blob(&mut mac, request.lease_id.as_bytes());
+    Ok(mac)
+}
+
+pub fn sign_allocation_status(request: &mut AllocationStatusRequest, key: &[u8]) -> Result<()> {
+    if !valid_allocation_status(request) {
+        bail!("invalid allocation status request fields");
+    }
+    request.auth_tag = allocation_status_mac(key, request)?
+        .finalize()
+        .into_bytes()
+        .to_vec();
+    Ok(())
+}
+
+pub fn verify_allocation_status(request: &AllocationStatusRequest, key: &[u8]) -> Result<bool> {
+    if request.auth_tag.len() != HMAC_TAG_BYTES || !valid_allocation_status(request) {
+        return Ok(false);
+    }
+    Ok(allocation_status_mac(key, request)?
+        .verify_slice(&request.auth_tag)
+        .is_ok())
+}
+
+fn valid_allocation_status_reply(reply: &AllocationStatusReply) -> bool {
+    reply.version == CONTROL_VERSION
+        && valid_allocation_uuid(&reply.coordinator_node_id)
+        && valid_allocation_uuid(&reply.node_id)
+        && valid_allocation_uuid(&reply.session_id)
+        && valid_allocation_uuid(&reply.lease_id)
+        && if reply.active {
+            reply.reserved_bytes > 0 && reply.expires_at_unix > 0
+        } else {
+            reply.reserved_bytes == 0 && reply.expires_at_unix == 0
+        }
+}
+
+fn allocation_status_reply_mac(
+    key: &[u8],
+    reply: &AllocationStatusReply,
+) -> Result<HmacSha256> {
+    let mut mac = new_mac(key, b"AITP/ALLOCATION_STATUS_REPLY/V1\0")?;
+    mac.update(&[reply.version]);
+    update_blob(&mut mac, reply.coordinator_node_id.as_bytes());
+    update_blob(&mut mac, reply.node_id.as_bytes());
+    update_blob(&mut mac, reply.session_id.as_bytes());
+    update_blob(&mut mac, reply.lease_id.as_bytes());
+    mac.update(&[u8::from(reply.active)]);
+    mac.update(&reply.reserved_bytes.to_be_bytes());
+    mac.update(&reply.expires_at_unix.to_be_bytes());
+    Ok(mac)
+}
+
+pub fn sign_allocation_status_reply(reply: &mut AllocationStatusReply, key: &[u8]) -> Result<()> {
+    if !valid_allocation_status_reply(reply) {
+        bail!("invalid allocation status reply fields");
+    }
+    reply.auth_tag = allocation_status_reply_mac(key, reply)?
+        .finalize()
+        .into_bytes()
+        .to_vec();
+    Ok(())
+}
+
+pub fn verify_allocation_status_reply(
+    reply: &AllocationStatusReply,
+    key: &[u8],
+) -> Result<bool> {
+    if reply.auth_tag.len() != HMAC_TAG_BYTES || !valid_allocation_status_reply(reply) {
+        return Ok(false);
+    }
+    Ok(allocation_status_reply_mac(key, reply)?
+        .verify_slice(&reply.auth_tag)
+        .is_ok())
+}
+
 fn update_optional_u64(mac: &mut HmacSha256, value: Option<u64>) {
     match value {
         Some(value) => {
@@ -725,6 +819,47 @@ mod tests {
         assert!(verify_allocation_release(&release, &key).unwrap());
         release.target_session_id = "00000000-0000-4000-8000-000000000099".into();
         assert!(!verify_allocation_release(&release, &key).unwrap());
+    }
+
+    #[test]
+    fn allocation_status_signatures_bind_query_and_reported_state() {
+        let key = [0x66; 32];
+        let mut request = AllocationStatusRequest {
+            version: CONTROL_VERSION,
+            coordinator_node_id: "00000000-0000-4000-8000-000000000001".into(),
+            target_node_id: "00000000-0000-4000-8000-000000000002".into(),
+            target_session_id: "00000000-0000-4000-8000-000000000003".into(),
+            lease_id: "00000000-0000-4000-8000-000000000004".into(),
+            auth_tag: Vec::new(),
+        };
+        sign_allocation_status(&mut request, &key).unwrap();
+        assert!(verify_allocation_status(&request, &key).unwrap());
+        request.lease_id = "00000000-0000-4000-8000-000000000005".into();
+        assert!(!verify_allocation_status(&request, &key).unwrap());
+
+        let mut reply = AllocationStatusReply {
+            version: CONTROL_VERSION,
+            coordinator_node_id: "00000000-0000-4000-8000-000000000001".into(),
+            node_id: "00000000-0000-4000-8000-000000000002".into(),
+            session_id: "00000000-0000-4000-8000-000000000003".into(),
+            lease_id: "00000000-0000-4000-8000-000000000004".into(),
+            active: true,
+            reserved_bytes: 4096,
+            expires_at_unix: 1_800_000_000,
+            auth_tag: Vec::new(),
+        };
+        sign_allocation_status_reply(&mut reply, &key).unwrap();
+        assert!(verify_allocation_status_reply(&reply, &key).unwrap());
+        reply.reserved_bytes += 1;
+        assert!(!verify_allocation_status_reply(&reply, &key).unwrap());
+
+        let mut inactive = reply;
+        inactive.active = false;
+        inactive.reserved_bytes = 0;
+        inactive.expires_at_unix = 0;
+        inactive.auth_tag.clear();
+        sign_allocation_status_reply(&mut inactive, &key).unwrap();
+        assert!(verify_allocation_status_reply(&inactive, &key).unwrap());
     }
 
     #[test]

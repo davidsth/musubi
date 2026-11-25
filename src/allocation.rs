@@ -17,7 +17,7 @@ use std::{
 
 use crate::{
     auth,
-    control::{AllocationPrepare, AllocationRelease},
+    control::{AllocationPrepare, AllocationRelease, AllocationStatusRequest},
     planner::PlacementPlan,
 };
 
@@ -168,6 +168,43 @@ impl NodeAllocationBook {
             now + Duration::from_secs(MAX_LEASE_TTL_SECS),
         );
         Ok(true)
+    }
+
+    /// Return the current state for an authenticated lease query. A request
+    /// from an earlier process session is reported inactive rather than
+    /// revealing or reviving the old reservation.
+    pub fn status(
+        &mut self,
+        request: &AllocationStatusRequest,
+        node_id: &str,
+        session_id: &str,
+        key: &[u8],
+        now: Instant,
+    ) -> Result<(bool, u64, u64), &'static str> {
+        self.expire(now);
+        if !auth::verify_allocation_status(request, key)
+            .map_err(|_| "allocation status authentication could not be verified")?
+        {
+            return Err("invalid allocation status authentication");
+        }
+        if request.target_node_id != node_id {
+            return Err("allocation status targets a different node");
+        }
+
+        let Some(lease) = self.active.get(&request.lease_id) else {
+            return Ok((false, 0, 0));
+        };
+        if lease.request.coordinator_node_id != request.coordinator_node_id
+            || lease.request.target_session_id != session_id
+            || request.target_session_id != session_id
+        {
+            return Ok((false, 0, 0));
+        }
+        Ok((
+            true,
+            lease.request.reserved_bytes,
+            lease.request.expires_at_unix,
+        ))
     }
 
     /// Expire monotonic lease deadlines and old replay tombstones.
@@ -501,7 +538,9 @@ mod tests {
     use super::*;
     use crate::{
         auth::{sign_allocation_prepare, sign_allocation_release},
-        control::{AllocationPrepare, AllocationRelease, CONTROL_VERSION},
+        control::{
+            AllocationPrepare, AllocationRelease, AllocationStatusRequest, CONTROL_VERSION,
+        },
     };
 
     fn signed_prepare(key: &[u8], lease_id: &str, bytes: u64, expiry: u64) -> AllocationPrepare {
@@ -585,6 +624,86 @@ mod tests {
         let mut incomplete = plan;
         incomplete.node_assignments[0].end_layer_exclusive = Some(2);
         assert!(targets_from_plan(&incomplete).is_err());
+    }
+
+    fn signed_status(key: &[u8], lease_id: &str, session_id: &str) -> AllocationStatusRequest {
+        let mut request = AllocationStatusRequest {
+            version: CONTROL_VERSION,
+            coordinator_node_id: "00000000-0000-4000-8000-000000000001".into(),
+            target_node_id: "00000000-0000-4000-8000-000000000002".into(),
+            target_session_id: session_id.into(),
+            lease_id: lease_id.into(),
+            auth_tag: Vec::new(),
+        };
+        auth::sign_allocation_status(&mut request, key).unwrap();
+        request
+    }
+
+    #[test]
+    fn status_reports_active_only_for_the_current_session_and_coordinator() {
+        let key = [0x4a; 32];
+        let now = Instant::now();
+        let lease_id = "00000000-0000-4000-8000-000000000009";
+        let request = signed_prepare(&key, lease_id, 256, 10_120);
+        let mut book = NodeAllocationBook::default();
+        book.prepare(
+            &request,
+            &request.target_node_id,
+            &request.target_session_id,
+            &key,
+            1024,
+            now,
+            10_000,
+        )
+        .unwrap();
+
+        let status = signed_status(&key, lease_id, &request.target_session_id);
+        assert_eq!(
+            book.status(
+                &status,
+                &request.target_node_id,
+                &request.target_session_id,
+                &key,
+                now,
+            )
+            .unwrap(),
+            (true, 256, 10_120)
+        );
+
+        let stale = signed_status(
+            &key,
+            lease_id,
+            "00000000-0000-4000-8000-000000000099",
+        );
+        assert_eq!(
+            book.status(
+                &stale,
+                &request.target_node_id,
+                &request.target_session_id,
+                &key,
+                now,
+            )
+            .unwrap(),
+            (false, 0, 0)
+        );
+
+        let mut other_coordinator = AllocationStatusRequest {
+            coordinator_node_id: "00000000-0000-4000-8000-000000000099".into(),
+            auth_tag: Vec::new(),
+            ..status.clone()
+        };
+        auth::sign_allocation_status(&mut other_coordinator, &key).unwrap();
+        assert_eq!(
+            book.status(
+                &other_coordinator,
+                &request.target_node_id,
+                &request.target_session_id,
+                &key,
+                now,
+            )
+            .unwrap(),
+            (false, 0, 0)
+        );
     }
 
     #[test]

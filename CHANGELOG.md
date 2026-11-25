@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.17.0 — Add authenticated lease status inspection
+
+- Bumped the JSON control-plane schema to version 9; the fixed 32-byte tensor data-plane header and payload framing are unchanged.
+- Added HMAC-SHA256, read-only allocation-status queries and replies bound to the coordinator, target node/session, lease ID, and returned active/reserved/expiry state.
+- Added worker-side status lookup that reports a lease active only for the current worker process session and owning coordinator; stale-session queries report inactive without reviving or changing a lease.
+- Added the `lease-status` CLI command to inspect all nodes in a saved lease record, verifying replies and distinguishing active, inactive, stale-session, mismatched, and unreachable targets.
+- Added tests for control datagram bounds, query/reply authentication and field binding, active-session matching, and coordinator isolation.
+- No changes to the binary tensor data plane, lease mutation semantics, or remote execution surface; status queries are read-only.
+
+# Changelog
+
 ## v0.16.0 — Add authenticated, expiring logical memory leases
 
 - Bumped the JSON control-plane schema to version 8; the fixed 32-byte tensor data-plane header and payload framing are unchanged.

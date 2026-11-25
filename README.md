@@ -254,7 +254,7 @@ The v0.9 dashboard also shows valid tensor manifests found in the dashboard host
 
 ## Authenticated manager membership v0.15
 
-The cluster manager now requires AITP_CLUSTER_KEY. A node started with --manager also requires the same key. Registration signs the complete node announcement and a fresh UUID process-session ID; heartbeats sign the node ID, session ID, sequence number, raw available-memory value, and active logical-reservation total. The manager accepts heartbeats only for the currently registered session and only when the sequence increases. The control-plane schema is version 8; older agents must be upgraded together.
+The cluster manager now requires AITP_CLUSTER_KEY. A node started with --manager also requires the same key. Registration signs the complete node announcement and a fresh UUID process-session ID; heartbeats sign the node ID, session ID, sequence number, raw available-memory value, and active logical-reservation total. The manager accepts heartbeats only for the currently registered session and only when the sequence increases. The control-plane schema is version 9; older agents must be upgraded together.
 
 macOS/Linux:
 
@@ -295,15 +295,25 @@ Release them early:
 
     cargo run --release -- release-lease --lease model-lease.json
 
+Inspect the live worker-side state at any time:
+
+    cargo run --release -- lease-status --lease model-lease.json
+
+The status command sends an authenticated, read-only query to each recorded worker. It distinguishes active reservations from expired/released leases, replaced worker process sessions, inconsistent reservation details, and unreachable workers. It does not change lease state; use `release-lease` to release active reservations.
+
 Run these commands with the same `AITP_CLUSTER_KEY` used by the manager and worker agents. The coordinator re-inspects the exact GGUF metadata, streams a SHA-256 hash of the model file, then sends authenticated prepare requests directly to the selected workers' control-plane UDP endpoints. Workers validate the target node ID and process-session ID, expiry, replay state, and current unreserved system RAM. The manager dashboard and subsequent plans show schedulable RAM after the reserved total is subtracted.
 
 The coordinator writes the lease record with create-new semantics before contacting workers. It attempts to release all targets if any prepare is rejected or times out. When rollback cannot be confirmed, it retains the record and prints the `release-lease` recovery command. A lease also expires automatically; a worker restart clears that worker's in-memory reservations and changes its process-session ID, so make a fresh cluster snapshot and placement after restarts.
 
 This feature intentionally does **not** pin or allocate physical memory, transfer GGUF weights, execute code, or load a llama.cpp context. It is a bounded coordination primitive to prevent cooperating AITP planners from intentionally overcommitting the same reported RAM; it cannot stop unrelated processes from consuming memory after a lease is granted. Worker lease state is in-memory. The small control-plane messages use bounded retries, but they still run over UDP and are not a production reliable or congestion-controlled transport. Anyone with the shared cluster key can request or release reservations; there is no per-user authorization or per-node credential system.
 
+## Authenticated lease status v0.17
+
+The `lease-status` command queries every target in a saved lease record and verifies a signed status reply from each worker. Replies bind the coordinator, node, current worker process session, lease ID, active flag, reserved byte count, and expiry. A worker restarted since planning reports its new session and an inactive lease, which helps identify stale records after process restarts. Unreachable workers are reported separately; their leases expire automatically within the configured TTL. Status queries are read-only and do not renew, release, or recreate reservations. The control-plane schema is version 9; upgrade the manager and all workers together.
+
 ## Security
 
-The manager's UDP registration and heartbeat messages, allocation-lease requests/replies, tensor offers, and authenticated tensor payload datagrams use HMAC-SHA256 with the shared environment-provided key; this provides integrity/authentication but not confidentiality. Discovery announcements and the legacy generic send/receive path remain unauthenticated metadata/compatibility paths. The HTTP dashboard is read-only but has no authentication or TLS; keep its default localhost bind unless using a trusted isolated LAN. The receiver enforces a 1 GiB per-tensor ceiling and writes to bounded temporary files. Do not expose these services to the public internet.
+The manager's UDP registration and heartbeat messages, allocation-lease prepare/release/status requests and replies, tensor offers, and authenticated tensor payload datagrams use HMAC-SHA256 with the shared environment-provided key; this provides integrity/authentication but not confidentiality. Discovery announcements and the legacy generic send/receive path remain unauthenticated metadata/compatibility paths. The HTTP dashboard is read-only but has no authentication or TLS; keep its default localhost bind unless using a trusted isolated LAN. The receiver enforces a 1 GiB per-tensor ceiling and writes to bounded temporary files. Do not expose these services to the public internet.
 
 ## License
 
