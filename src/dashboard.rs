@@ -103,6 +103,31 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_snapshot_reports_session_and_reserved_memory() {
+        let node = DashboardNode {
+            node_id: "node-id".into(),
+            hostname: "worker".into(),
+            address: "192.0.2.10:9001".into(),
+            session_id: "00000000-0000-4000-8000-000000000042".into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            cpu_model: "Test CPU".into(),
+            logical_cpus: 8,
+            total_memory_bytes: 4096,
+            available_memory_bytes: 1024,
+            reserved_memory_bytes: 512,
+            accelerators: Vec::new(),
+            online: true,
+            last_seen_secs: 0,
+        };
+        let value = serde_json::to_value(node).unwrap();
+        assert_eq!(value["session_id"], "00000000-0000-4000-8000-000000000042");
+        assert_eq!(value["available_memory_bytes"], 1024);
+        assert_eq!(value["reserved_memory_bytes"], 512);
+        assert!(DASHBOARD_HTML.contains("Memory free / reserved"));
+    }
+
+    #[test]
     fn dashboard_contains_read_only_routes_only() {
         assert!(DASHBOARD_HTML.contains("/api/cluster"));
         assert!(!DASHBOARD_HTML.contains("eval("));
