@@ -540,11 +540,11 @@ fn valid_allocation_status_reply(reply: &AllocationStatusReply) -> bool {
         && valid_allocation_uuid(&reply.session_id)
         && valid_allocation_uuid(&reply.lease_id)
         && valid_allocation_uuid(&reply.request_id)
-        && if reply.active {
+        && (if reply.active {
             reply.reserved_bytes > 0 && reply.expires_at_unix > 0
         } else {
             reply.reserved_bytes == 0 && reply.expires_at_unix == 0
-        }
+        })
 }
 
 fn allocation_status_reply_mac(

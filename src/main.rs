@@ -1741,14 +1741,6 @@ async fn run_node(
 }
 
 #[derive(Debug)]
-struct ManagedNode {                    _ => {}
-                }
-            }
-        }
-    }
-}
-
-#[derive(Debug)]
 struct ManagedNode {
     announcement: NodeAnnouncement,
     address: SocketAddr,
