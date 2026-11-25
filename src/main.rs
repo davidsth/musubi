@@ -1504,9 +1504,15 @@ async fn run_node(
                         }
                     }
                     ControlMessage::AllocationPrepare { request } => {
-                        let (Some(key), true) = (cluster_key.as_deref(), manager.is_some()) else {
+                        if manager.is_none() {
+                            continue;
+                        }
+                        let Some(key) = cluster_key.as_deref() else {
                             continue;
                         };
+                        if !auth::verify_allocation_prepare(&request, key).unwrap_or(false) {
+                            continue;
+                        }
                         system.refresh_memory();
                         let available_memory_bytes = system.available_memory().min(total_memory_bytes);
                         let result = allocation_book.lock().await.prepare(
@@ -1540,9 +1546,15 @@ async fn run_node(
                         }
                     }
                     ControlMessage::AllocationRelease { request } => {
-                        let (Some(key), true) = (cluster_key.as_deref(), manager.is_some()) else {
+                        if manager.is_none() {
+                            continue;
+                        }
+                        let Some(key) = cluster_key.as_deref() else {
                             continue;
                         };
+                        if !auth::verify_allocation_release(&request, key).unwrap_or(false) {
+                            continue;
+                        }
                         let released = allocation_book.lock().await.release(
                             &request,
                             &node_id,
@@ -1623,10 +1635,11 @@ async fn run_manager(
                     for (id, node) in ordered {
                         let age = node.last_seen.elapsed();
                         let status = if age <= offline_after { "ONLINE" } else { "OFFLINE" };
-                        println!("- {} [{}] {} {} | {} | {} CPUs | RAM {:.1}/{:.1} GiB available/total | {} | last heartbeat {:.1}s ago",
+                        println!("- {} [{}] {} {} | {} | {} CPUs | RAM {:.1} GiB schedulable + {:.1} GiB reserved / {:.1} GiB total | {} | last heartbeat {:.1}s ago",
                             node.announcement.hostname, id, node.announcement.os,
                             node.announcement.arch, node.announcement.cpu_model, node.announcement.logical_cpus,
-                            node.announcement.available_memory_bytes as f64 / 1024.0_f64.powi(3),
+                            node.announcement.available_memory_bytes.saturating_sub(node.reserved_memory_bytes) as f64 / 1024.0_f64.powi(3),
+                            node.reserved_memory_bytes as f64 / 1024.0_f64.powi(3),
                             node.announcement.total_memory_bytes as f64 / 1024.0_f64.powi(3),
                             status, age.as_secs_f32());
                         for gpu in &node.announcement.accelerators { println!("    GPU: {} ({}, {})", gpu.name, gpu.vendor, hardware::memory_label(gpu)); }
