@@ -4,6 +4,7 @@ mod control;
 mod dashboard;
 mod gguf;
 mod hardware;
+mod model_stage;
 mod planner;
 mod protocol;
 mod runtime;
@@ -30,7 +31,7 @@ use std::{
 };
 use sysinfo::System;
 use tensor::TensorDescriptor;
-use tokio::{fs, net::UdpSocket, sync::Mutex, time::timeout};
+use tokio::{fs, net::{TcpListener, UdpSocket}, sync::Mutex, time::timeout};
 use worker::OfferAdmission;
 
 const CHUNK_SIZE: usize = MAX_PAYLOAD;
@@ -119,6 +120,9 @@ enum Command {
         manager: Option<SocketAddr>,
         #[arg(long, default_value_t = 1000)]
         heartbeat_ms: u64,
+        /// Dedicated TCP listener for lease-bound GGUF artifact staging.
+        #[arg(long, default_value = "0.0.0.0:9004")]
+        stage_bind: SocketAddr,
     },
     /// Discover AITP nodes using IPv4 UDP broadcast.
     Discover {
@@ -197,6 +201,21 @@ enum Command {
         #[arg(long)]
         lease: PathBuf,
     },
+    /// Stage the complete GGUF artifact on workers with an active matching allocation lease.
+    StageModel {
+        /// Saved lease record produced by reserve-plan.
+        #[arg(long)]
+        lease: PathBuf,
+        /// Exact GGUF file used to create the reservation.
+        #[arg(long)]
+        model: PathBuf,
+        /// Optional target node UUID; omit to stage to every worker in the lease.
+        #[arg(long)]
+        node_id: Option<String>,
+        /// TCP port used by worker staging listeners.
+        #[arg(long, default_value_t = model_stage::DEFAULT_STAGE_PORT)]
+        stage_port: u16,
+    },
     /// Run a cluster manager that authenticates node registrations and heartbeats.
     Manager {
         #[arg(long, default_value = "0.0.0.0:9002")]
@@ -239,7 +258,8 @@ async fn main() -> Result<()> {
             name,
             manager,
             heartbeat_ms,
-        } => run_node(bind, data_port, name, manager, heartbeat_ms).await,
+            stage_bind,
+        } => run_node(bind, data_port, name, manager, heartbeat_ms, stage_bind).await,
         Command::Discover { target, wait_ms } => {
             discover(target, Duration::from_millis(wait_ms)).await
         }
@@ -270,6 +290,12 @@ async fn main() -> Result<()> {
         } => reserve_plan(plan, model, output, ttl_secs).await,
         Command::ReleaseLease { lease } => release_lease(lease).await,
         Command::LeaseStatus { lease } => lease_status(lease).await,
+        Command::StageModel {
+            lease,
+            model,
+            node_id,
+            stage_port,
+        } => stage_model(lease, model, node_id, stage_port).await,
         Command::Manager {
             bind,
             timeout_ms,
@@ -867,6 +893,101 @@ async fn lease_status(lease_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
+async fn stage_model(
+    lease_path: PathBuf,
+    model_path: PathBuf,
+    node_filter: Option<String>,
+    stage_port: u16,
+) -> Result<()> {
+    if stage_port == 0 {
+        bail!("model-stage TCP port must be nonzero");
+    }
+    let key = auth::cluster_key_from_env()?
+        .context("set AITP_CLUSTER_KEY to the same 32+ byte secret used by the manager and workers")?;
+    let record = allocation::load_lease_record(&lease_path)?;
+    if record.expires_at_unix <= allocation::unix_now()? {
+        bail!("allocation lease has expired; create a fresh plan and lease before staging");
+    }
+    let coordinator_node_id = persistent_node_id()?;
+    if record.coordinator_node_id != coordinator_node_id {
+        bail!("lease record belongs to a different coordinator node identity");
+    }
+
+    let expected_filename = record.model_filename.clone();
+    let source_path = model_path.clone();
+    let (model, source_sha256) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let summary = gguf::inspect_file(&source_path)
+            .with_context(|| format!("inspecting GGUF model {}", source_path.display()))?;
+        if summary.file_bytes > model_stage::MAX_MODEL_BYTES {
+            bail!("GGUF model exceeds the model-stage size ceiling");
+        }
+        let digest = allocation::sha256_model(
+            &source_path,
+            summary.file_bytes,
+            &expected_filename,
+        )?;
+        Ok((summary, digest))
+    })
+    .await
+    .context("joining GGUF inspection and hashing task")??;
+
+    if source_sha256 != record.model_sha256 {
+        bail!("source GGUF SHA-256 does not match the saved allocation lease");
+    }
+
+    let targets: Vec<_> = record
+        .targets
+        .iter()
+        .filter(|target| node_filter.as_deref().is_none_or(|id| id == target.node_id))
+        .collect();
+    if targets.is_empty() {
+        match node_filter {
+            Some(node_id) => bail!("node {node_id} is not assigned by this lease"),
+            None => bail!("allocation lease contains no staging targets"),
+        }
+    }
+
+    println!(
+        "Staging complete GGUF artifact '{}' ({:.2} GiB, SHA-256 {}…) to {} worker(s).",
+        record.model_filename,
+        model.file_bytes as f64 / 1024.0_f64.powi(3),
+        &record.model_sha256[..16],
+        targets.len()
+    );
+    println!("Each receipt is bound to the active lease, target process session, and assigned layer range.");
+
+    for target in targets {
+        let control_address: SocketAddr = target.address.parse()
+            .with_context(|| format!("parsing address for node {}", target.node_id))?;
+        let stage_address = SocketAddr::new(control_address.ip(), stage_port);
+        let request = model_stage::StageRequest {
+            version: model_stage::STAGE_PROTOCOL_VERSION,
+            coordinator_node_id: record.coordinator_node_id.clone(),
+            target_node_id: target.node_id.clone(),
+            target_session_id: target.node_session_id.clone(),
+            lease_id: record.lease_id.clone(),
+            request_id: uuid::Uuid::new_v4().to_string(),
+            model_filename: record.model_filename.clone(),
+            model_sha256: record.model_sha256.clone(),
+            model_bytes: model.file_bytes,
+            first_layer: target.first_layer,
+            end_layer_exclusive: target.end_layer_exclusive,
+            auth_tag: Vec::new(),
+        };
+        let reply = model_stage::send_to_worker(stage_address, &model_path, request, &key)
+            .await
+            .with_context(|| format!("staging model on node {} at {}", target.node_id, stage_address))?;
+        println!(
+            "{:?}: node {} | {} | lease {}",
+            reply.status,
+            reply.node_id,
+            reply.payload_file.as_deref().unwrap_or("no artifact"),
+            reply.lease_id
+        );
+    }
+    Ok(())
+}
+
 fn inspect_gguf(input: PathBuf, tensor_limit: usize) -> Result<()> {
     if tensor_limit > 128 {
         bail!("--tensor-limit may not exceed 128");
@@ -1407,6 +1528,7 @@ async fn run_node(
     name: Option<String>,
     manager: Option<SocketAddr>,
     heartbeat_ms: u64,
+    stage_bind: SocketAddr,
 ) -> Result<()> {
     let cluster_key = auth::cluster_key_from_env()?;
     if manager.is_some() && cluster_key.is_none() {
@@ -1416,10 +1538,37 @@ async fn run_node(
     if data_port == 0 {
         bail!("data port must be nonzero");
     }
+    if stage_bind.port() == 0 {
+        bail!("model-stage TCP port must be nonzero");
+    }
     let socket = UdpSocket::bind(bind).await?;
     let node_id = persistent_node_id()?;
     let offer_admission = Arc::new(Mutex::new(OfferAdmission::default()));
     let allocation_book = Arc::new(Mutex::new(allocation::NodeAllocationBook::default()));
+    if manager.is_some() {
+        let key = cluster_key.clone()
+            .context("managed model staging requires AITP_CLUSTER_KEY")?;
+        let listener = TcpListener::bind(stage_bind)
+            .await
+            .with_context(|| format!("binding lease-bound GGUF staging listener {stage_bind}"))?;
+        let stage_book = allocation_book.clone();
+        let stage_node_id = node_id.clone();
+        let stage_session_id = session_id.clone();
+        let stage_directory = model_stage::configured_model_dir();
+        tokio::spawn(async move {
+            if let Err(error) = model_stage::run_listener(
+                listener,
+                stage_node_id,
+                stage_session_id,
+                key,
+                stage_book,
+                stage_directory,
+            ).await {
+                eprintln!("AITP GGUF staging listener stopped: {error:#}");
+            }
+        });
+        println!("Lease-bound GGUF staging TCP listener active on {stage_bind}");
+    }
     if let Some(key) = cluster_key.clone() {
         let data_bind = SocketAddr::new(bind.ip(), data_port);
         let data_socket = UdpSocket::bind(data_bind)
