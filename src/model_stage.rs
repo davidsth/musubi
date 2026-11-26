@@ -195,6 +195,20 @@ async fn serve_connection(
         bail!("model-stage request authentication failed");
     }
     request.validate()?;
+    if request.target_node_id != node_id || request.target_session_id != session_id {
+        return send_status(
+            &mut stream,
+            &request,
+            node_id,
+            session_id,
+            key,
+            StageStatus::Rejected,
+            Some("request target does not match this worker process identity".into()),
+            None,
+            None,
+        )
+        .await;
+    }
 
     let authorized = allocation_book.lock().await.authorize_model_stage(
         &request.coordinator_node_id,
@@ -980,6 +994,79 @@ mod tests {
         assert!(verify_stage_request(&request, &key).unwrap());
         request.model_bytes += 1;
         assert!(!verify_stage_request(&request, &key).unwrap());
+    }
+
+    #[tokio::test]
+    async fn stage_request_must_name_the_actual_worker_and_session() {
+        let key = vec![0x44; 32];
+        let coordinator = uuid::Uuid::new_v4().to_string();
+        let node = uuid::Uuid::new_v4().to_string();
+        let session = uuid::Uuid::new_v4().to_string();
+        let lease = uuid::Uuid::new_v4().to_string();
+        let bytes = b"worker identity binding".to_vec();
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        let book = Arc::new(Mutex::new(make_book(
+            &key,
+            &coordinator,
+            &node,
+            &session,
+            &lease,
+            &digest,
+            Some(0),
+            Some(2),
+        )));
+        let root = temp_root();
+        let model_dir = root.join("models");
+
+        for (target_node_id, target_session_id) in [
+            (uuid::Uuid::new_v4().to_string(), session.clone()),
+            (node.clone(), uuid::Uuid::new_v4().to_string()),
+        ] {
+            let mut request = make_request(
+                &coordinator,
+                &node,
+                &session,
+                &lease,
+                &digest,
+                bytes.len() as u64,
+                Some(0),
+                Some(2),
+            );
+            request.target_node_id = target_node_id;
+            request.target_session_id = target_session_id;
+            sign_stage_request(&mut request, &key).unwrap();
+
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server_book = book.clone();
+            let server_key = key.clone();
+            let server_node = node.clone();
+            let server_session = session.clone();
+            let server_dir = model_dir.clone();
+            let server = tokio::spawn(async move {
+                let (stream, peer) = listener.accept().await.unwrap();
+                serve_connection(
+                    stream,
+                    peer,
+                    &server_node,
+                    &server_session,
+                    &server_key,
+                    server_book,
+                    &server_dir,
+                )
+                .await
+                .unwrap();
+            });
+
+            let mut stream = TcpStream::connect(address).await.unwrap();
+            write_frame(&mut stream, &request).await.unwrap();
+            let reply: StageReply = read_frame(&mut stream).await.unwrap();
+            assert_eq!(reply.status, StageStatus::Rejected);
+            assert!(verify_stage_reply(&reply, &key).unwrap());
+            server.await.unwrap();
+        }
+
+        assert!(!fs::try_exists(&model_dir).await.unwrap());
     }
 
     #[tokio::test]
