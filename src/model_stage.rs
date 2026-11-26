@@ -4,6 +4,7 @@
 //! lease control plane and the optimized fixed-header UDP tensor data plane.
 //! TCP provides ordered delivery and transport flow control for bulk files;
 //! staged model files are published only after exact-length and SHA-256 checks.
+use crate::allocation::NodeAllocationBook;
 use anyhow::{bail, Context, Result};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
@@ -21,8 +22,6 @@ use tokio::{
     sync::Mutex,
     time::timeout,
 };
-use crate::allocation::NodeAllocationBook;
-
 type HmacSha256 = Hmac<Sha256>;
 
 pub const STAGE_PROTOCOL_VERSION: u16 = 1;
@@ -256,7 +255,15 @@ async fn serve_connection(
                 )
                 .await;
             }
-            publish_manifest(model_dir, &request, node_id, session_id, &payload_file, &manifest_file).await?;
+            publish_manifest(
+                model_dir,
+                &request,
+                node_id,
+                session_id,
+                &payload_file,
+                &manifest_file,
+            )
+            .await?;
             return send_status(
                 &mut stream,
                 &request,
@@ -385,11 +392,20 @@ async fn serve_connection(
     } else {
         if let Err(error) = fs::rename(&partial_path, &payload_path).await {
             let _ = fs::remove_file(&partial_path).await;
-            return Err(error).with_context(|| format!("publishing model {}", payload_path.display()));
+            return Err(error)
+                .with_context(|| format!("publishing model {}", payload_path.display()));
         }
     }
 
-    publish_manifest(model_dir, &request, node_id, session_id, &payload_file, &manifest_file).await?;
+    publish_manifest(
+        model_dir,
+        &request,
+        node_id,
+        session_id,
+        &payload_file,
+        &manifest_file,
+    )
+    .await?;
     send_status(
         &mut stream,
         &request,
@@ -500,8 +516,8 @@ async fn publish_manifest(
                 bail!("existing staged-model manifest is not a bounded regular file");
             }
             let encoded = fs::read(&final_path).await?;
-            let existing: StagedModelManifest =
-                serde_json::from_slice(&encoded).context("parsing existing staged-model manifest")?;
+            let existing: StagedModelManifest = serde_json::from_slice(&encoded)
+                .context("parsing existing staged-model manifest")?;
             existing.validate()?;
             if !same_manifest_binding(&existing, &manifest) {
                 bail!("existing staged-model manifest is bound to different artifact or lease metadata");
@@ -526,7 +542,12 @@ async fn publish_manifest(
         .create_new(true)
         .open(&temporary_path)
         .await
-        .with_context(|| format!("creating manifest staging file {}", temporary_path.display()))?;
+        .with_context(|| {
+            format!(
+                "creating manifest staging file {}",
+                temporary_path.display()
+            )
+        })?;
     if let Err(error) = file.write_all(&encoded).await {
         drop(file);
         let _ = fs::remove_file(&temporary_path).await;
@@ -540,7 +561,8 @@ async fn publish_manifest(
     drop(file);
     if let Err(error) = fs::rename(&temporary_path, &final_path).await {
         let _ = fs::remove_file(&temporary_path).await;
-        return Err(error).with_context(|| format!("publishing staged-model manifest {}", final_path.display()));
+        return Err(error)
+            .with_context(|| format!("publishing staged-model manifest {}", final_path.display()));
     }
     Ok(())
 }
@@ -599,7 +621,9 @@ pub async fn send_to_worker(
         .await
         .with_context(|| format!("inspecting source model {}", model_path.display()))?;
     if !metadata.file_type().is_file() || metadata.len() != request.model_bytes {
-        bail!("source model must be a regular file with the exact byte length in the staging request");
+        bail!(
+            "source model must be a regular file with the exact byte length in the staging request"
+        );
     }
     request.auth_tag.clear();
     sign_stage_request(&mut request, key)?;
@@ -674,10 +698,12 @@ fn verify_reply_for_request(reply: &StageReply, request: &StageRequest, key: &[u
     {
         bail!("worker model-stage response does not match the authenticated request");
     }
-    if matches!(reply.status, StageStatus::Complete | StageStatus::AlreadyPresent) {
+    if matches!(
+        reply.status,
+        StageStatus::Complete | StageStatus::AlreadyPresent
+    ) {
         let expected_payload = format!("{}.gguf", request.model_sha256);
-        let expected_manifest =
-            format!("{}.{}.aitp.json", request.model_sha256, request.lease_id);
+        let expected_manifest = format!("{}.{}.aitp.json", request.model_sha256, request.lease_id);
         if reply.payload_file.as_deref() != Some(expected_payload.as_str())
             || reply.manifest_file.as_deref() != Some(expected_manifest.as_str())
         {
@@ -756,8 +782,8 @@ fn new_mac(key: &[u8], domain: &[u8]) -> Result<HmacSha256> {
     if key.len() < 32 {
         bail!("AITP cluster key must contain at least 32 bytes");
     }
-    let mut mac = HmacSha256::new_from_slice(key)
-        .map_err(|_| anyhow::anyhow!("invalid HMAC key"))?;
+    let mut mac =
+        HmacSha256::new_from_slice(key).map_err(|_| anyhow::anyhow!("invalid HMAC key"))?;
     mac.update(domain);
     Ok(mac)
 }
@@ -833,7 +859,10 @@ fn is_safe_gguf_name(value: &str) -> bool {
         && value.to_ascii_lowercase().ends_with(".gguf")
         && value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric()
-                || matches!(byte, b'.' | b'_' | b'-' | b' ' | b'(' | b')' | b'[' | b']' | b'+')
+                || matches!(
+                    byte,
+                    b'.' | b'_' | b'-' | b' ' | b'(' | b')' | b'[' | b']' | b'+'
+                )
         })
 }
 
@@ -925,16 +954,8 @@ mod tests {
             first_layer,
             end_layer_exclusive,
         );
-        book.prepare(
-            &prepare,
-            node,
-            session,
-            key,
-            4096,
-            now,
-            unix_now().unwrap(),
-        )
-        .unwrap();
+        book.prepare(&prepare, node, session, key, 4096, now, unix_now().unwrap())
+            .unwrap();
         book
     }
 
@@ -1130,13 +1151,17 @@ mod tests {
             auth_tag: Vec::new(),
         };
         sign_allocation_release(&mut release, &key).unwrap();
-        assert!(book.lock().await.release(
-            &release,
-            &request.target_node_id,
-            &request.target_session_id,
-            &key,
-            Instant::now(),
-        ).unwrap());
+        assert!(book
+            .lock()
+            .await
+            .release(
+                &release,
+                &request.target_node_id,
+                &request.target_session_id,
+                &key,
+                Instant::now(),
+            )
+            .unwrap());
 
         stream.write_all(&bytes).await.unwrap();
         let rejected: StageReply = read_frame(&mut stream).await.unwrap();
