@@ -297,7 +297,7 @@ async fn serve_connection(
         .await
         .with_context(|| format!("creating staging file {}", partial_path.display()))?;
 
-    send_status(
+    if let Err(error) = send_status(
         &mut stream,
         &request,
         node_id,
@@ -308,7 +308,12 @@ async fn serve_connection(
         None,
         None,
     )
-    .await?;
+    .await
+    {
+        drop(staging_file);
+        let _ = fs::remove_file(&partial_path).await;
+        return Err(error).context("notifying coordinator that model staging is ready");
+    }
 
     if let Err(error) = receive_payload(&mut stream, &mut staging_file, &request).await {
         drop(staging_file);
