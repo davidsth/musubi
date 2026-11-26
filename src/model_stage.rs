@@ -841,8 +841,8 @@ mod tests {
     use super::*;
     use crate::{
         allocation::unix_now,
-        auth::sign_allocation_prepare,
-        control::{AllocationPrepare, CONTROL_VERSION},
+        auth::{sign_allocation_prepare, sign_allocation_release},
+        control::{AllocationPrepare, AllocationRelease, CONTROL_VERSION},
     };
 
     fn signed_prepare(
@@ -1056,6 +1056,100 @@ mod tests {
         let repeated = send_to_worker(address, &source, retry, &key).await.unwrap();
         server.await.unwrap();
         assert_eq!(repeated.status, StageStatus::AlreadyPresent);
+        fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn released_lease_during_upload_prevents_publication() {
+        let key = vec![0x43; 32];
+        let coordinator = uuid::Uuid::new_v4().to_string();
+        let node = uuid::Uuid::new_v4().to_string();
+        let session = uuid::Uuid::new_v4().to_string();
+        let lease = uuid::Uuid::new_v4().to_string();
+        let bytes = b"payload is complete but its lease is revoked".to_vec();
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        let request = make_request(
+            &coordinator,
+            &node,
+            &session,
+            &lease,
+            &digest,
+            bytes.len() as u64,
+            Some(0),
+            Some(2),
+        );
+        let book = Arc::new(Mutex::new(make_book(
+            &key,
+            &coordinator,
+            &node,
+            &session,
+            &lease,
+            &digest,
+            Some(0),
+            Some(2),
+        )));
+        let root = temp_root();
+        fs::create_dir_all(&root).await.unwrap();
+        let model_dir = root.join("models");
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_book = book.clone();
+        let server_key = key.clone();
+        let server_node = node.clone();
+        let server_session = session.clone();
+        let server_dir = model_dir.clone();
+        let server = tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            serve_connection(
+                stream,
+                peer,
+                &server_node,
+                &server_session,
+                &server_key,
+                server_book,
+                &server_dir,
+            )
+            .await
+            .unwrap();
+        });
+
+        let mut signed = request.clone();
+        sign_stage_request(&mut signed, &key).unwrap();
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        write_frame(&mut stream, &signed).await.unwrap();
+        let ready: StageReply = read_frame(&mut stream).await.unwrap();
+        assert_eq!(ready.status, StageStatus::Ready);
+
+        let mut release = AllocationRelease {
+            version: CONTROL_VERSION,
+            coordinator_node_id: coordinator,
+            target_node_id: node,
+            target_session_id: session,
+            lease_id: lease,
+            auth_tag: Vec::new(),
+        };
+        sign_allocation_release(&mut release, &key).unwrap();
+        assert!(book.lock().await.release(
+            &release,
+            &request.target_node_id,
+            &request.target_session_id,
+            &key,
+            Instant::now(),
+        ).unwrap());
+
+        stream.write_all(&bytes).await.unwrap();
+        let rejected: StageReply = read_frame(&mut stream).await.unwrap();
+        assert_eq!(rejected.status, StageStatus::Rejected);
+        assert!(verify_stage_reply(&rejected, &key).unwrap());
+        server.await.unwrap();
+
+        let mut entries = fs::read_dir(&model_dir).await.unwrap();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            assert!(!name.ends_with(".gguf"));
+            assert!(!name.ends_with(".aitp.json"));
+            assert!(!name.ends_with(".part"));
+        }
         fs::remove_dir_all(root).await.unwrap();
     }
 
