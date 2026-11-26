@@ -1,8 +1,9 @@
 //! Lease-bound GGUF artifact staging over a dedicated TCP stream.
 //!
-//! This control-plane service uses TCP for reliable, backpressured file delivery.
-//! It is separate from the fixed-header UDP tensor data plane. Staged model files
-//! are published only after exact-length and SHA-256 verification.
+//! This artifact-staging channel is distinct from both the JSON UDP membership/
+//! lease control plane and the optimized fixed-header UDP tensor data plane.
+//! TCP provides ordered delivery and transport flow control for bulk files;
+//! staged model files are published only after exact-length and SHA-256 checks.
 use anyhow::{bail, Context, Result};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
