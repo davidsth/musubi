@@ -207,6 +207,45 @@ impl NodeAllocationBook {
         ))
     }
 
+    /// Authorize an artifact transfer against a currently active logical lease.
+    ///
+    /// The caller must authenticate the TCP staging request first. This method
+    /// then binds that request to the exact coordinator, node process session,
+    /// model digest, and transformer-layer range that were accepted at prepare
+    /// time. Expired or released leases cannot authorize a new transfer.
+    pub fn authorize_model_stage(
+        &mut self,
+        coordinator_node_id: &str,
+        node_id: &str,
+        session_id: &str,
+        lease_id: &str,
+        model_sha256: &str,
+        first_layer: Option<u64>,
+        end_layer_exclusive: Option<u64>,
+        now: Instant,
+    ) -> Result<(), &'static str> {
+        self.expire(now);
+        let Some(active) = self.active.get(lease_id) else {
+            return Err("allocation lease is not active");
+        };
+        let request = &active.request;
+        if request.coordinator_node_id != coordinator_node_id {
+            return Err("allocation lease belongs to a different coordinator");
+        }
+        if request.target_node_id != node_id || request.target_session_id != session_id {
+            return Err("allocation lease belongs to a different node process session");
+        }
+        if request.model_sha256 != model_sha256 {
+            return Err("model digest does not match the active allocation lease");
+        }
+        if request.first_layer != first_layer
+            || request.end_layer_exclusive != end_layer_exclusive
+        {
+            return Err("transformer-layer range does not match the active allocation lease");
+        }
+        Ok(())
+    }
+
     /// Expire monotonic lease deadlines and old replay tombstones.
     pub fn expire(&mut self, now: Instant) -> usize {
         let expired: Vec<String> = self
