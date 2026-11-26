@@ -31,7 +31,12 @@ use std::{
 };
 use sysinfo::System;
 use tensor::TensorDescriptor;
-use tokio::{fs, net::{TcpListener, UdpSocket}, sync::Mutex, time::timeout};
+use tokio::{
+    fs,
+    net::{TcpListener, UdpSocket},
+    sync::Mutex,
+    time::timeout,
+};
 use worker::OfferAdmission;
 
 const CHUNK_SIZE: usize = MAX_PAYLOAD;
@@ -902,8 +907,9 @@ async fn stage_model(
     if stage_port == 0 {
         bail!("model-stage TCP port must be nonzero");
     }
-    let key = auth::cluster_key_from_env()?
-        .context("set AITP_CLUSTER_KEY to the same 32+ byte secret used by the manager and workers")?;
+    let key = auth::cluster_key_from_env()?.context(
+        "set AITP_CLUSTER_KEY to the same 32+ byte secret used by the manager and workers",
+    )?;
     let record = allocation::load_lease_record(&lease_path)?;
     if record.expires_at_unix <= allocation::unix_now()? {
         bail!("allocation lease has expired; create a fresh plan and lease before staging");
@@ -921,11 +927,8 @@ async fn stage_model(
         if summary.file_bytes > model_stage::MAX_MODEL_BYTES {
             bail!("GGUF model exceeds the model-stage size ceiling");
         }
-        let digest = allocation::sha256_model(
-            &source_path,
-            summary.file_bytes,
-            &expected_filename,
-        )?;
+        let digest =
+            allocation::sha256_model(&source_path, summary.file_bytes, &expected_filename)?;
         Ok((summary, digest))
     })
     .await
@@ -938,7 +941,12 @@ async fn stage_model(
     let targets: Vec<_> = record
         .targets
         .iter()
-        .filter(|target| node_filter.as_deref().map(|id| id == target.node_id.as_str()).unwrap_or(true))
+        .filter(|target| {
+            node_filter
+                .as_deref()
+                .map(|id| id == target.node_id.as_str())
+                .unwrap_or(true)
+        })
         .collect();
     if targets.is_empty() {
         match node_filter {
@@ -957,7 +965,9 @@ async fn stage_model(
     println!("Each receipt is bound to the active lease, target process session, and assigned layer range.");
 
     for target in targets {
-        let control_address: SocketAddr = target.address.parse()
+        let control_address: SocketAddr = target
+            .address
+            .parse()
             .with_context(|| format!("parsing address for node {}", target.node_id))?;
         let stage_address = SocketAddr::new(control_address.ip(), stage_port);
         let request = model_stage::StageRequest {
@@ -976,7 +986,12 @@ async fn stage_model(
         };
         let reply = model_stage::send_to_worker(stage_address, &model_path, request, &key)
             .await
-            .with_context(|| format!("staging model on node {} at {}", target.node_id, stage_address))?;
+            .with_context(|| {
+                format!(
+                    "staging model on node {} at {}",
+                    target.node_id, stage_address
+                )
+            })?;
         println!(
             "{:?}: node {} | {} | lease {}",
             reply.status,
@@ -1546,7 +1561,8 @@ async fn run_node(
     let offer_admission = Arc::new(Mutex::new(OfferAdmission::default()));
     let allocation_book = Arc::new(Mutex::new(allocation::NodeAllocationBook::default()));
     if manager.is_some() {
-        let key = cluster_key.clone()
+        let key = cluster_key
+            .clone()
             .context("managed model staging requires AITP_CLUSTER_KEY")?;
         let listener = TcpListener::bind(stage_bind)
             .await
@@ -1563,7 +1579,9 @@ async fn run_node(
                 key,
                 stage_book,
                 stage_directory,
-            ).await {
+            )
+            .await
+            {
                 eprintln!("AITP GGUF staging listener stopped: {error:#}");
             }
         });
