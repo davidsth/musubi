@@ -305,15 +305,37 @@ Run these commands with the same `AITP_CLUSTER_KEY` used by the manager and work
 
 The coordinator writes the lease record with create-new semantics before contacting workers. It attempts to release all targets if any prepare is rejected or times out. When rollback cannot be confirmed, it retains the record and prints the `release-lease` recovery command. A lease also expires automatically; a worker restart clears that worker's in-memory reservations and changes its process-session ID, so make a fresh cluster snapshot and placement after restarts.
 
-This feature intentionally does **not** pin or allocate physical memory, transfer GGUF weights, execute code, or load a llama.cpp context. It is a bounded coordination primitive to prevent cooperating AITP planners from intentionally overcommitting the same reported RAM; it cannot stop unrelated processes from consuming memory after a lease is granted. Worker lease state is in-memory. The small control-plane messages use bounded retries, but they still run over UDP and are not a production reliable or congestion-controlled transport. Anyone with the shared cluster key can request or release reservations; there is no per-user authorization or per-node credential system.
+The v0.16 lease mechanism is logical accounting only: it does **not** pin or allocate physical memory, and it cannot stop unrelated processes from consuming memory after a lease is granted. Worker lease state is in-memory. The v0.18 staging command below transfers the full GGUF artifact to disk over a separate TCP stream; it does not load model weights, allocate runtime tensors, or execute a llama.cpp context. Allocation/status control messages remain small authenticated UDP datagrams with bounded retries, not a production congestion-controlled transport. Anyone with the shared cluster key can request or release reservations or stage artifacts against leases they control; there is no per-user authorization or per-node credential system.
 
 ## Authenticated lease status v0.17
 
 The `lease-status` command queries every target in a saved lease record and verifies a signed status reply from each worker. Replies bind the coordinator, node, current worker process session, lease ID, a fresh per-query UUID, active flag, reserved byte count, and expiry. The UUID prevents a captured response from satisfying a later status query. A worker restarted since planning reports its new session and an inactive lease, which helps identify stale records after process restarts. Unreachable workers are reported separately; their leases expire automatically within the configured TTL. Status queries are read-only and do not renew, release, or recreate reservations. The control-plane schema is version 9; upgrade the manager and all workers together.
 
+## Lease-bound GGUF artifact staging v0.18
+
+A managed worker with `AITP_CLUSTER_KEY` starts a dedicated TCP model-staging listener on `0.0.0.0:9004` by default. Override it with `--stage-bind` when starting the node. Allow that TCP port through the trusted-LAN firewall. This is a separate stream service; it does not use the fixed-header UDP tensor data plane for large model files.
+
+After creating and reserving a placement:
+
+    cargo run --release -- stage-model --lease model-lease.json --model ./aitp-models/model.gguf
+
+The coordinator must be the node identity that created the lease, and the source model's basename, file length, and SHA-256 must match the saved record. The command stages to every target in the lease. To retry or inspect one worker only:
+
+    cargo run --release -- stage-model --lease model-lease.json --model ./aitp-models/model.gguf --node-id <worker-uuid>
+
+For a worker using a non-default TCP port, pass the same port to the coordinator:
+
+    cargo run --release -- stage-model --lease model-lease.json --model ./aitp-models/model.gguf --stage-port 9104
+
+The worker authenticates a bounded request with HMAC-SHA256 and requires a current, unexpired lease matching the coordinator, worker process session, model digest, and assigned layer range. It streams exactly the declared number of bytes into a hidden temporary file using a 1 MiB buffer. Both ends compute SHA-256; the worker rechecks the lease immediately before publishing the artifact. An interrupted or mismatched transfer removes the partial file and never publishes a manifest.
+
+Verified files are stored under `AITP_MODEL_DIR` (default `aitp-models/`) as content-addressed `<sha256>.gguf` artifacts, with a per-lease `<sha256>.<lease-id>.aitp.json` receipt. Repeating a completed transfer reuses the existing file only after rechecking its file type, size, and digest. The manifest records the target layer range and current worker process session.
+
+**Current scope:** this increment copies the complete GGUF file to each selected worker; it does not yet build layer-only shards, load the model, reserve physical RAM, or run inference. Workers process one staging upload at a time to bound disk writers. TCP provides an ordered stream with transport-level flow control and backpressure; the small UDP manager/lease messages remain a separate control plane.
+
 ## Security
 
-The manager's UDP registration and heartbeat messages, allocation-lease prepare/release/status requests and replies, tensor offers, and authenticated tensor payload datagrams use HMAC-SHA256 with the shared environment-provided key; this provides integrity/authentication but not confidentiality. Discovery announcements and the legacy generic send/receive path remain unauthenticated metadata/compatibility paths. The HTTP dashboard is read-only but has no authentication or TLS; keep its default localhost bind unless using a trusted isolated LAN. The receiver enforces a 1 GiB per-tensor ceiling and writes to bounded temporary files. Do not expose these services to the public internet.
+The manager's UDP registration and heartbeat messages, allocation-lease prepare/release/status requests and replies, tensor offers, authenticated tensor payload datagrams, and TCP model-stage requests/receipts use HMAC-SHA256 with the shared environment-provided key; this provides integrity/authentication but not confidentiality. Discovery announcements and the legacy generic send/receive path remain unauthenticated metadata/compatibility paths. The HTTP dashboard is read-only but has no authentication or TLS; keep its default localhost bind unless using a trusted isolated LAN. The receiver enforces a 1 GiB per-tensor ceiling and writes to bounded temporary files. Do not expose these services to the public internet.
 
 ## License
 
