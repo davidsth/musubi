@@ -9,6 +9,7 @@
 - Publish content-addressed `<sha256>.gguf` artifacts and per-lease JSON receipts only after full verification; interrupted uploads remove their temporary files, and already-verified artifacts are idempotently reused.
 - Added `stage-model` CLI and an optional `--node-id` filter; managed workers expose a dedicated `--stage-bind` listener. The complete GGUF is copied to each target at this stage; files are not yet sharded or loaded into llama.cpp.
 - Added tests for exact lease binding, signed request tampering, multi-chunk TCP staging, idempotent retry, and interrupted-upload cleanup.
+- Bound requests to the actual worker process identity, added a short unauthenticated-header timeout, and tested rejection when a lease is revoked during upload. Staging must complete within the active lease TTL (maximum 300 seconds); renewal/resume is deferred.
 - No arbitrary remote execution, model invocation, or UDP congestion-control claim added.
 
 ## v0.17.0 — Add authenticated lease status inspection
