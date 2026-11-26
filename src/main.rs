@@ -938,7 +938,7 @@ async fn stage_model(
     let targets: Vec<_> = record
         .targets
         .iter()
-        .filter(|target| node_filter.as_deref().is_none_or(|id| id == target.node_id))
+        .filter(|target| node_filter.as_deref().map(|id| id == target.node_id.as_str()).unwrap_or(true))
         .collect();
     if targets.is_empty() {
         match node_filter {
