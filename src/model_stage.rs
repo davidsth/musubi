@@ -186,7 +186,11 @@ async fn serve_connection(
     model_dir: &Path,
 ) -> Result<()> {
     stream.set_nodelay(true)?;
-    let request: StageRequest = read_frame(&mut stream).await?;
+    // The listener handles one upload at a time; keep unauthenticated peers
+    // from occupying it indefinitely with a partial JSON header.
+    let request: StageRequest = timeout(Duration::from_secs(5), read_frame(&mut stream))
+        .await
+        .context("timed out waiting for an authenticated model-stage request")??;
     if !verify_stage_request(&request, key)? {
         bail!("model-stage request authentication failed");
     }
@@ -494,18 +498,29 @@ async fn publish_manifest(
     manifest.validate()?;
 
     let final_path = directory.join(manifest_file);
-    if let Ok(metadata) = fs::symlink_metadata(&final_path).await {
-        if !metadata.file_type().is_file() || metadata.len() == 0 || metadata.len() > MAX_MANIFEST_BYTES as u64 {
-            bail!("existing staged-model manifest is not a bounded regular file");
+    match fs::symlink_metadata(&final_path).await {
+        Ok(metadata) => {
+            if !metadata.file_type().is_file()
+                || metadata.len() == 0
+                || metadata.len() > MAX_MANIFEST_BYTES as u64
+            {
+                bail!("existing staged-model manifest is not a bounded regular file");
+            }
+            let encoded = fs::read(&final_path).await?;
+            let existing: StagedModelManifest =
+                serde_json::from_slice(&encoded).context("parsing existing staged-model manifest")?;
+            existing.validate()?;
+            if !same_manifest_binding(&existing, &manifest) {
+                bail!("existing staged-model manifest is bound to different artifact or lease metadata");
+            }
+            return Ok(());
         }
-        let encoded = fs::read(&final_path).await?;
-        let existing: StagedModelManifest =
-            serde_json::from_slice(&encoded).context("parsing existing staged-model manifest")?;
-        existing.validate()?;
-        if !same_manifest_binding(&existing, &manifest) {
-            bail!("existing staged-model manifest is bound to different artifact or lease metadata");
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("checking staged-model manifest {}", final_path.display())
+            });
         }
-        return Ok(());
     }
 
     let encoded = serde_json::to_vec_pretty(&manifest)?;
@@ -666,12 +681,15 @@ fn verify_reply_for_request(reply: &StageReply, request: &StageRequest, key: &[u
     {
         bail!("worker model-stage response does not match the authenticated request");
     }
-    if matches!(reply.status, StageStatus::Complete | StageStatus::AlreadyPresent)
-        && (reply.payload_file.as_deref() != Some(format!("{}.gguf", request.model_sha256).as_str())
-            || reply.manifest_file.as_deref()
-                != Some(format!("{}.{}.aitp.json", request.model_sha256, request.lease_id).as_str()))
-    {
-        bail!("worker model-stage receipt contains unexpected artifact paths");
+    if matches!(reply.status, StageStatus::Complete | StageStatus::AlreadyPresent) {
+        let expected_payload = format!("{}.gguf", request.model_sha256);
+        let expected_manifest =
+            format!("{}.{}.aitp.json", request.model_sha256, request.lease_id);
+        if reply.payload_file.as_deref() != Some(expected_payload.as_str())
+            || reply.manifest_file.as_deref() != Some(expected_manifest.as_str())
+        {
+            bail!("worker model-stage receipt contains unexpected artifact paths");
+        }
     }
     Ok(())
 }
