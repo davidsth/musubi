@@ -178,7 +178,7 @@ pub async fn run_listener(
 
 async fn serve_connection(
     mut stream: TcpStream,
-    peer: SocketAddr,
+    _peer: SocketAddr,
     node_id: &str,
     session_id: &str,
     key: &[u8],
@@ -290,13 +290,12 @@ async fn serve_connection(
         ".{}.{}.part",
         request.model_sha256, request.request_id
     ));
-    let staging_file = OpenOptions::new()
+    let mut staging_file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&partial_path)
         .await
         .with_context(|| format!("creating staging file {}", partial_path.display()))?;
-    drop(staging_file);
 
     send_status(
         &mut stream,
@@ -311,7 +310,8 @@ async fn serve_connection(
     )
     .await?;
 
-    if let Err(error) = receive_payload(&mut stream, &partial_path, &request).await {
+    if let Err(error) = receive_payload(&mut stream, &mut staging_file, &request).await {
+        drop(staging_file);
         let _ = fs::remove_file(&partial_path).await;
         let _ = send_status(
             &mut stream,
@@ -327,6 +327,7 @@ async fn serve_connection(
         .await;
         return Err(error).context("receiving GGUF artifact");
     }
+    drop(staging_file);
 
     let still_authorized = allocation_book.lock().await.authorize_model_stage(
         &request.coordinator_node_id,
@@ -399,47 +400,33 @@ async fn serve_connection(
 
 async fn receive_payload(
     stream: &mut TcpStream,
-    partial_path: &Path,
+    output: &mut fs::File,
     request: &StageRequest,
 ) -> Result<()> {
-    let result = async {
-        let mut output = OpenOptions::new()
-            .write(true)
-            .open(partial_path)
+    let mut remaining = request.model_bytes;
+    let mut buffer = vec![0u8; COPY_BUFFER_BYTES];
+    let mut hasher = Sha256::new();
+
+    while remaining > 0 {
+        let count = remaining.min(buffer.len() as u64) as usize;
+        timeout(IO_IDLE_TIMEOUT, stream.read_exact(&mut buffer[..count]))
             .await
-            .with_context(|| format!("opening staging file {}", partial_path.display()))?;
-        let mut remaining = request.model_bytes;
-        let mut buffer = vec![0u8; COPY_BUFFER_BYTES];
-        let mut hasher = Sha256::new();
-
-        while remaining > 0 {
-            let count = remaining.min(buffer.len() as u64) as usize;
-            timeout(IO_IDLE_TIMEOUT, stream.read_exact(&mut buffer[..count]))
-                .await
-                .context("timed out waiting for model bytes")??;
-            output.write_all(&buffer[..count]).await?;
-            hasher.update(&buffer[..count]);
-            remaining -= count as u64;
-        }
-        output.sync_all().await?;
-        drop(output);
-
-        let actual = format!("{:x}", hasher.finalize());
-        if actual != request.model_sha256 {
-            bail!("received GGUF SHA-256 does not match the active allocation lease");
-        }
-        let metadata = fs::symlink_metadata(partial_path).await?;
-        if !metadata.file_type().is_file() || metadata.len() != request.model_bytes {
-            bail!("received GGUF file type or byte length is invalid");
-        }
-        Ok(())
+            .context("timed out waiting for model bytes")??;
+        output.write_all(&buffer[..count]).await?;
+        hasher.update(&buffer[..count]);
+        remaining -= count as u64;
     }
-    .await;
+    output.sync_all().await?;
 
-    if result.is_err() {
-        let _ = fs::remove_file(partial_path).await;
+    let actual = format!("{:x}", hasher.finalize());
+    if actual != request.model_sha256 {
+        bail!("received GGUF SHA-256 does not match the active allocation lease");
     }
-    result
+    let metadata = output.metadata().await?;
+    if !metadata.is_file() || metadata.len() != request.model_bytes {
+        bail!("received GGUF file type or byte length is invalid");
+    }
+    Ok(())
 }
 
 async fn verify_existing_payload(path: &Path, request: &StageRequest) -> Result<Option<bool>> {
