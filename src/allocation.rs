@@ -238,8 +238,7 @@ impl NodeAllocationBook {
         if request.model_sha256 != model_sha256 {
             return Err("model digest does not match the active allocation lease");
         }
-        if request.first_layer != first_layer
-            || request.end_layer_exclusive != end_layer_exclusive
+        if request.first_layer != first_layer || request.end_layer_exclusive != end_layer_exclusive
         {
             return Err("transformer-layer range does not match the active allocation lease");
         }
@@ -758,68 +757,80 @@ mod tests {
         )
         .unwrap();
 
-        assert!(book.authorize_model_stage(
-            &request.coordinator_node_id,
-            &request.target_node_id,
-            &request.target_session_id,
-            lease_id,
-            &request.model_sha256,
-            request.first_layer,
-            request.end_layer_exclusive,
-            now,
-        ).is_ok());
+        assert!(book
+            .authorize_model_stage(
+                &request.coordinator_node_id,
+                &request.target_node_id,
+                &request.target_session_id,
+                lease_id,
+                &request.model_sha256,
+                request.first_layer,
+                request.end_layer_exclusive,
+                now,
+            )
+            .is_ok());
 
-        assert!(book.authorize_model_stage(
-            "00000000-0000-4000-8000-000000000099",
-            &request.target_node_id,
-            &request.target_session_id,
-            lease_id,
-            &request.model_sha256,
-            request.first_layer,
-            request.end_layer_exclusive,
-            now,
-        ).is_err());
-        assert!(book.authorize_model_stage(
-            &request.coordinator_node_id,
-            &request.target_node_id,
-            "00000000-0000-4000-8000-000000000099",
-            lease_id,
-            &request.model_sha256,
-            request.first_layer,
-            request.end_layer_exclusive,
-            now,
-        ).is_err());
-        assert!(book.authorize_model_stage(
-            &request.coordinator_node_id,
-            &request.target_node_id,
-            &request.target_session_id,
-            lease_id,
-            &"b".repeat(64),
-            request.first_layer,
-            request.end_layer_exclusive,
-            now,
-        ).is_err());
-        assert!(book.authorize_model_stage(
-            &request.coordinator_node_id,
-            &request.target_node_id,
-            &request.target_session_id,
-            lease_id,
-            &request.model_sha256,
-            Some(1),
-            Some(5),
-            now,
-        ).is_err());
+        assert!(book
+            .authorize_model_stage(
+                "00000000-0000-4000-8000-000000000099",
+                &request.target_node_id,
+                &request.target_session_id,
+                lease_id,
+                &request.model_sha256,
+                request.first_layer,
+                request.end_layer_exclusive,
+                now,
+            )
+            .is_err());
+        assert!(book
+            .authorize_model_stage(
+                &request.coordinator_node_id,
+                &request.target_node_id,
+                "00000000-0000-4000-8000-000000000099",
+                lease_id,
+                &request.model_sha256,
+                request.first_layer,
+                request.end_layer_exclusive,
+                now,
+            )
+            .is_err());
+        assert!(book
+            .authorize_model_stage(
+                &request.coordinator_node_id,
+                &request.target_node_id,
+                &request.target_session_id,
+                lease_id,
+                &"b".repeat(64),
+                request.first_layer,
+                request.end_layer_exclusive,
+                now,
+            )
+            .is_err());
+        assert!(book
+            .authorize_model_stage(
+                &request.coordinator_node_id,
+                &request.target_node_id,
+                &request.target_session_id,
+                lease_id,
+                &request.model_sha256,
+                Some(1),
+                Some(5),
+                now,
+            )
+            .is_err());
 
-        assert!(book.authorize_model_stage(
-            &request.coordinator_node_id,
-            &request.target_node_id,
-            &request.target_session_id,
-            lease_id,
-            &request.model_sha256,
-            request.first_layer,
-            request.end_layer_exclusive,
-            now + Duration::from_secs(121),
-        ).is_err());
+        assert!(book
+            .authorize_model_stage(
+                &request.coordinator_node_id,
+                &request.target_node_id,
+                &request.target_session_id,
+                lease_id,
+                &request.model_sha256,
+                request.first_layer,
+                request.end_layer_exclusive,
+                now + Duration::from_secs(121),
+            )
+            .is_err());
         assert_eq!(book.reserved_bytes(), 0);
     }
 
