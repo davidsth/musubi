@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.18.0 — Add lease-bound GGUF artifact staging over TCP
+
+- Added a separate TCP model-staging service (default port 9004) for reliable, backpressured GGUF artifact delivery; the UDP control-plane schema v9 and fixed 32-byte tensor data-plane header are unchanged.
+- Added HMAC-SHA256 stage requests and signed receipts bound to coordinator identity, worker process session, active lease ID, request UUID, model basename, SHA-256, exact byte count, and assigned transformer-layer range.
+- Workers accept staging only when the exact allocation lease is active and re-check the lease before publication; mismatched coordinator, node/session, digest, or layer-range requests are rejected.
+- Streamed exact model bytes with a 1 MiB bounded buffer, per-read/write idle timeouts, a 256 GiB model-size ceiling, and SHA-256 verification on both ends.
+- Publish content-addressed `<sha256>.gguf` artifacts and per-lease JSON receipts only after full verification; interrupted uploads remove their temporary files, and already-verified artifacts are idempotently reused.
+- Added `stage-model` CLI and an optional `--node-id` filter; managed workers expose a dedicated `--stage-bind` listener. The complete GGUF is copied to each target at this stage; files are not yet sharded or loaded into llama.cpp.
+- Added tests for exact lease binding, signed request tampering, multi-chunk TCP staging, idempotent retry, and interrupted-upload cleanup.
+- No arbitrary remote execution, model invocation, or UDP congestion-control claim added.
+
 ## v0.17.0 — Add authenticated lease status inspection
 
 - Bumped the JSON control-plane schema to version 9; the fixed 32-byte tensor data-plane header and payload framing are unchanged.
