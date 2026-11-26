@@ -327,6 +327,8 @@ For a worker using a non-default TCP port, pass the same port to the coordinator
 
     cargo run --release -- stage-model --lease model-lease.json --model ./aitp-models/model.gguf --stage-port 9104
 
+The upload must finish before the allocation lease expires. For larger files, create the reservation with a longer TTL (up to the current 300-second maximum), for example `reserve-plan --ttl-secs 300`. If the lease is released or expires during transfer, the worker rejects publication and removes the partial file. Automatic lease renewal and resumable uploads are not implemented yet.
+
 The worker authenticates a bounded request with HMAC-SHA256 and requires a current, unexpired lease matching the coordinator, worker process session, model digest, and assigned layer range. It streams exactly the declared number of bytes into a hidden temporary file using a 1 MiB buffer. Both ends compute SHA-256; the worker rechecks the lease immediately before publishing the artifact. A disconnected, timed-out, or mismatched transfer removes the partial file and never publishes a manifest. A worker crash or power loss can leave a hidden `.part` file; it is never catalogued as a completed model and can be removed during offline store maintenance.
 
 Verified files are stored under `AITP_MODEL_DIR` (default `aitp-models/`) as content-addressed `<sha256>.gguf` artifacts, with a per-lease `<sha256>.<lease-id>.aitp.json` receipt. Repeating a completed transfer reuses the existing file only after rechecking its file type, size, and digest. The manifest records the target layer range and current worker process session.
