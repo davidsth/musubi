@@ -333,6 +333,8 @@ The worker authenticates a bounded request with HMAC-SHA256 and requires a curre
 
 Verified files are stored under `AITP_MODEL_DIR` (default `aitp-models/`) as content-addressed `<sha256>.gguf` artifacts, with a per-lease `<sha256>.<lease-id>.aitp.json` receipt. Repeating a completed transfer reuses the existing file only after rechecking its file type, size, and digest. The manifest records the target layer range and current worker process session.
 
+When opening the coordinator's source model or rechecking an existing content-addressed worker artifact, AITP opens the file handle without following symbolic links (Unix `O_NOFOLLOW`) or Windows reparse points, then hashes through that same handle. This prevents a path from being swapped to a link between a metadata check and the read. This v0.19 hardening does not change the staging wire protocol.
+
 **Current scope:** this increment copies the complete GGUF file to each selected worker; it does not yet build layer-only shards, load the model, reserve physical RAM, or run inference. Workers process one staging upload at a time to bound disk writers. TCP provides an ordered stream with transport-level flow control and backpressure; the small UDP manager/lease messages remain a separate control plane.
 
 ## Security
