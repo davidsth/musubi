@@ -496,9 +496,12 @@ fn open_regular_file_no_follow(path: &Path) -> Result<std::fs::File> {
         options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
 
-    let file = options
-        .open(path)
-        .with_context(|| format!("opening model file without following links {}", path.display()))?;
+    let file = options.open(path).with_context(|| {
+        format!(
+            "opening model file without following links {}",
+            path.display()
+        )
+    })?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
         bail!("model artifact path is not a regular file");
