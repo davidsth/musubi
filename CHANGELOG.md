@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.19.0 — Harden staged model file opens
+
+- Open coordinator source models and existing content-addressed worker artifacts without following symbolic links or Windows reparse points; validate and hash the opened file handle rather than reopening a path after a metadata check.
+- Added a Unix regression test proving that staged-model hash verification rejects symbolic-link paths.
+- Kept the JSON control plane, TCP staging protocol, and fixed 32-byte UDP tensor data-plane framing unchanged.
+
 ## v0.18.0 — Add lease-bound GGUF artifact staging over TCP
 
 - Added a separate TCP model-staging service (default port 9004) for reliable, backpressured GGUF artifact delivery; the UDP control-plane schema v9 and fixed 32-byte tensor data-plane header are unchanged.
