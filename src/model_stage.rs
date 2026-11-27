@@ -477,10 +477,49 @@ async fn verify_existing_payload(path: &Path, request: &StageRequest) -> Result<
     Ok(Some(sha256_file(path).await? == request.model_sha256))
 }
 
+/// Open a regular file without following symbolic links or Windows reparse
+/// points. The returned handle is then used for metadata checks and reads.
+fn open_regular_file_no_follow(path: &Path) -> Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+
+    let file = options
+        .open(path)
+        .with_context(|| format!("opening model file without following links {}", path.display()))?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        bail!("model artifact path is not a regular file");
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            bail!("refusing a Windows reparse-point model artifact");
+        }
+    }
+
+    Ok(file)
+}
+
 async fn sha256_file(path: &Path) -> Result<String> {
-    let mut file = fs::File::open(path)
-        .await
+    let source = open_regular_file_no_follow(path)
         .with_context(|| format!("opening model payload {}", path.display()))?;
+    let mut file = fs::File::from_std(source);
     let mut buffer = vec![0u8; COPY_BUFFER_BYTES];
     let mut hasher = Sha256::new();
     loop {
@@ -631,10 +670,14 @@ pub async fn send_to_worker(
     mut request: StageRequest,
     key: &[u8],
 ) -> Result<StageReply> {
-    let metadata = fs::symlink_metadata(model_path)
-        .await
+    // Open the source once without following symbolic links/reparse points, then
+    // keep this handle for the entire transfer so validation and reads use the
+    // same file object.
+    let source_file = open_regular_file_no_follow(model_path)
         .with_context(|| format!("inspecting source model {}", model_path.display()))?;
-    if !metadata.file_type().is_file() || metadata.len() != request.model_bytes {
+    let mut source = fs::File::from_std(source_file);
+    let metadata = source.metadata().await?;
+    if !metadata.is_file() || metadata.len() != request.model_bytes {
         bail!(
             "source model must be a regular file with the exact byte length in the staging request"
         );
@@ -661,9 +704,6 @@ pub async fn send_to_worker(
         StageStatus::Complete => bail!("worker returned COMPLETE before receiving the model bytes"),
     }
 
-    let mut source = fs::File::open(model_path)
-        .await
-        .with_context(|| format!("opening source model {}", model_path.display()))?;
     let mut remaining = request.model_bytes;
     let mut buffer = vec![0u8; COPY_BUFFER_BYTES];
     let mut hasher = Sha256::new();
@@ -1336,6 +1376,21 @@ mod tests {
             assert!(!name.ends_with(".aitp.json"));
             assert!(!name.ends_with(".part"));
         }
+        fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn staged_model_hash_refuses_symbolic_links() {
+        let root = temp_root();
+        fs::create_dir_all(&root).await.unwrap();
+        let target = root.join("real-model.gguf");
+        let link = root.join("linked-model.gguf");
+        fs::write(&target, b"verified model bytes").await.unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert!(sha256_file(&link).await.is_err());
+
         fs::remove_dir_all(root).await.unwrap();
     }
 }
