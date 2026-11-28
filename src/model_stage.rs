@@ -10,6 +10,7 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashSet,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -20,12 +21,19 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::Mutex,
+    task::JoinSet,
     time::timeout,
 };
 type HmacSha256 = Hmac<Sha256>;
 
 pub const STAGE_PROTOCOL_VERSION: u16 = 1;
 pub const DEFAULT_STAGE_PORT: u16 = 9004;
+/// Default number of simultaneous worker artifact uploads from one coordinator.
+pub const DEFAULT_STAGE_PARALLELISM: usize = 2;
+/// Keep fan-out bounded so each transfer's fixed-size copy buffer has a known ceiling.
+pub const MAX_STAGE_PARALLELISM: usize = 8;
+/// Bound metadata and task creation even for malformed lease records.
+pub const MAX_STAGE_TARGETS: usize = 256;
 /// A conservative upper bound for a single GGUF transfer (large enough for
 /// current very-large quantized models while limiting authenticated disk use).
 pub const MAX_MODEL_BYTES: u64 = 256 * 1024 * 1024 * 1024;
@@ -100,6 +108,15 @@ pub struct StageReply {
     pub manifest_file: Option<String>,
     pub reason: Option<String>,
     pub auth_tag: Vec<u8>,
+}
+
+/// Outcome for one worker in a bounded multi-worker staging operation.
+/// A failed worker does not prevent the coordinator from collecting other outcomes.
+#[derive(Debug)]
+pub struct StageWorkerResult {
+    pub node_id: String,
+    pub address: SocketAddr,
+    pub result: Result<StageReply>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -740,6 +757,99 @@ pub async fn send_to_worker(
     }
 }
 
+/// Stage one model artifact to several workers with a bounded number of concurrent TCP streams.
+///
+/// Every request must describe the same coordinator, lease, and content-addressed model.
+/// Worker-specific node/session IDs and layer ranges remain individually authenticated.
+/// Results are returned in input order; a worker failure is reported in its own result so
+/// the remaining workers can finish and the caller can provide a complete summary.
+pub async fn send_to_workers(
+    jobs: Vec<(SocketAddr, PathBuf, StageRequest)>,
+    key: &[u8],
+    parallelism: usize,
+) -> Result<Vec<StageWorkerResult>> {
+    if !(1..=MAX_STAGE_PARALLELISM).contains(&parallelism) {
+        bail!(
+            "model-stage parallelism must be between 1 and {MAX_STAGE_PARALLELISM}"
+        );
+    }
+    if jobs.len() > MAX_STAGE_TARGETS {
+        bail!("model-stage target count exceeds the safety limit of {MAX_STAGE_TARGETS}");
+    }
+    let Some((_, _, first_request)) = jobs.first() else {
+        return Ok(Vec::new());
+    };
+
+    let mut node_ids = HashSet::with_capacity(jobs.len());
+    let mut request_ids = HashSet::with_capacity(jobs.len());
+    for (address, _, request) in &jobs {
+        request.validate()?;
+        if address.port() == 0 || address.ip().is_unspecified() {
+            bail!("model-stage target address must have a specified IP and nonzero port");
+        }
+        if !node_ids.insert(request.target_node_id.as_str()) {
+            bail!("model-stage target list contains a duplicate worker node ID");
+        }
+        if !request_ids.insert(request.request_id.as_str()) {
+            bail!("model-stage target list contains a duplicate request UUID");
+        }
+        if request.coordinator_node_id != first_request.coordinator_node_id
+            || request.lease_id != first_request.lease_id
+            || request.model_filename != first_request.model_filename
+            || request.model_sha256 != first_request.model_sha256
+            || request.model_bytes != first_request.model_bytes
+        {
+            bail!("all model-stage targets must share one coordinator, lease, and model artifact");
+        }
+    }
+
+    let total = jobs.len();
+    let mut pending = jobs.into_iter().enumerate();
+    let shared_key: Arc<[u8]> = Arc::from(key);
+    let mut tasks: JoinSet<(usize, StageWorkerResult)> = JoinSet::new();
+
+    for _ in 0..parallelism {
+        if let Some((index, job)) = pending.next() {
+            spawn_stage_worker(&mut tasks, index, job, shared_key.clone());
+        }
+    }
+
+    let mut completed = Vec::with_capacity(total);
+    while let Some(joined) = tasks.join_next().await {
+        completed.push(joined.context("joining model-stage worker transfer task")?);
+        if let Some((index, job)) = pending.next() {
+            spawn_stage_worker(&mut tasks, index, job, shared_key.clone());
+        }
+    }
+
+    completed.sort_unstable_by_key(|(index, _)| *index);
+    Ok(completed
+        .into_iter()
+        .map(|(_, result)| result)
+        .collect())
+}
+
+fn spawn_stage_worker(
+    tasks: &mut JoinSet<(usize, StageWorkerResult)>,
+    index: usize,
+    job: (SocketAddr, PathBuf, StageRequest),
+    key: Arc<[u8]>,
+) {
+    tasks.spawn(async move {
+        let (address, model_path, request) = job;
+        let node_id = request.target_node_id.clone();
+        let result = send_to_worker(address, &model_path, request, &key).await;
+        (
+            index,
+            StageWorkerResult {
+                node_id,
+                address,
+                result,
+            },
+        )
+    });
+}
+
 fn verify_reply_for_request(reply: &StageReply, request: &StageRequest, key: &[u8]) -> Result<()> {
     if !verify_stage_reply(reply, key)? {
         bail!("worker returned an invalid model-stage response signature");
@@ -1378,6 +1488,106 @@ mod tests {
             assert!(!name.ends_with(".gguf"));
             assert!(!name.ends_with(".aitp.json"));
             assert!(!name.ends_with(".part"));
+        }
+        fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn send_to_workers_rejects_unbounded_parallelism() {
+        let key = [0x44; 32];
+        assert!(send_to_workers(Vec::new(), &key, 0).await.is_err());
+        assert!(send_to_workers(Vec::new(), &key, MAX_STAGE_PARALLELISM + 1)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn bounded_multi_worker_staging_verifies_every_worker_artifact() {
+        let key = vec![0x55; 32];
+        let coordinator = uuid::Uuid::new_v4().to_string();
+        let lease = uuid::Uuid::new_v4().to_string();
+        let bytes = vec![0x5a; COPY_BUFFER_BYTES + 257];
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        let root = temp_root();
+        fs::create_dir_all(&root).await.unwrap();
+        let source = root.join("source.gguf");
+        fs::write(&source, &bytes).await.unwrap();
+
+        let mut jobs = Vec::new();
+        let mut servers = Vec::new();
+        let mut expected_nodes = Vec::new();
+        let mut model_dirs = Vec::new();
+
+        for index in 0..3u64 {
+            let node = uuid::Uuid::new_v4().to_string();
+            let session = uuid::Uuid::new_v4().to_string();
+            let first_layer = index * 2;
+            let end_layer_exclusive = first_layer + 2;
+            let book = Arc::new(Mutex::new(make_book(
+                &key,
+                &coordinator,
+                &node,
+                &session,
+                &lease,
+                &digest,
+                Some(first_layer),
+                Some(end_layer_exclusive),
+            )));
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let model_dir = root.join(format!("worker-{index}"));
+
+            let server_book = book.clone();
+            let server_key = key.clone();
+            let server_node = node.clone();
+            let server_session = session.clone();
+            let server_dir = model_dir.clone();
+            servers.push(tokio::spawn(async move {
+                let (stream, peer) = listener.accept().await?;
+                serve_connection(
+                    stream,
+                    peer,
+                    &server_node,
+                    &server_session,
+                    &server_key,
+                    server_book,
+                    &server_dir,
+                )
+                .await
+            }));
+
+            jobs.push((
+                address,
+                source.clone(),
+                make_request(
+                    &coordinator,
+                    &node,
+                    &session,
+                    &lease,
+                    &digest,
+                    bytes.len() as u64,
+                    Some(first_layer),
+                    Some(end_layer_exclusive),
+                ),
+            ));
+            expected_nodes.push(node);
+            model_dirs.push(model_dir);
+        }
+
+        let results = send_to_workers(jobs, &key, 2).await.unwrap();
+        assert_eq!(results.len(), 3);
+        for (index, result) in results.iter().enumerate() {
+            assert_eq!(result.node_id, expected_nodes[index]);
+            assert!(result.result.is_ok(), "worker {}: {:?}", result.node_id, result.result);
+            assert_eq!(result.result.as_ref().unwrap().status, StageStatus::Complete);
+        }
+
+        for server in servers {
+            server.await.unwrap().unwrap();
+        }
+        for model_dir in model_dirs {
+            let payload = model_dir.join(format!("{digest}.gguf"));
+            assert_eq!(fs::read(payload).await.unwrap(), bytes);
         }
         fs::remove_dir_all(root).await.unwrap();
     }
