@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.20.0 — Add bounded parallel GGUF staging
+
+- Added coordinator-side multi-worker TCP staging fan-out with a bounded 1–8 concurrency limit (default 2); requests remain independently authenticated and lease/session/layer-range bound.
+- Results are collected in placement order and reported per worker; one worker's connection or transfer error no longer prevents the coordinator from attempting the remaining selected workers.
+- Added tests for the concurrency limit and multi-worker artifact integrity across transfers larger than the 1 MiB copy buffer.
+- Added the \`stage-model --parallelism\` option and documented trade-offs for constrained LANs. Each worker still serves one upload at a time.
+- No control-plane schema, TCP staging frame, or fixed 32-byte UDP tensor data-plane wire-format changes; no model sharding or inference execution added.
+
 ## v0.19.0 — Harden staged model file opens
 
 - Open coordinator source models and existing content-addressed worker artifacts without following symbolic links or Windows reparse points; validate and hash the opened file handle rather than reopening a path after a metadata check.
