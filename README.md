@@ -331,7 +331,7 @@ The coordinator can upload to several workers concurrently while keeping the num
 
     cargo run --release -- stage-model --lease model-lease.json --model ./aitp-models/model.gguf --parallelism 4
 
-\`--parallelism\` accepts 1–8 and defaults to 2. A low value is preferable on Wi-Fi or when disk bandwidth is constrained. The coordinator keeps at most that many worker transfers active, collects a result for every target, and reports failures after the other transfers finish. Each worker still serves one staging upload at a time. Parallel uploads do not extend the lease TTL; create a lease long enough for the slowest target, up to the existing 300-second limit.
+`--parallelism` accepts 1–8 and defaults to 2. A low value is preferable on Wi-Fi or when disk bandwidth is constrained. The coordinator keeps at most that many worker transfers active, collects a result for every target, and reports failures after the other transfers finish. Each worker still serves one staging upload at a time. Parallel uploads do not extend the lease TTL; create a lease long enough for the slowest target, up to the existing 300-second limit.
 
 The upload must finish before the allocation lease expires. For larger files, create the reservation with a longer TTL (up to the current 300-second maximum), for example `reserve-plan --ttl-secs 300`. If the lease is released or expires during transfer, the worker rejects publication and removes the partial file. Automatic lease renewal and resumable uploads are not implemented yet.
 
