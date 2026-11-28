@@ -769,9 +769,7 @@ pub async fn send_to_workers(
     parallelism: usize,
 ) -> Result<Vec<StageWorkerResult>> {
     if !(1..=MAX_STAGE_PARALLELISM).contains(&parallelism) {
-        bail!(
-            "model-stage parallelism must be between 1 and {MAX_STAGE_PARALLELISM}"
-        );
+        bail!("model-stage parallelism must be between 1 and {MAX_STAGE_PARALLELISM}");
     }
     if jobs.len() > MAX_STAGE_TARGETS {
         bail!("model-stage target count exceeds the safety limit of {MAX_STAGE_TARGETS}");
@@ -828,10 +826,7 @@ pub async fn send_to_workers(
     }
 
     completed.sort_unstable_by_key(|(index, _)| *index);
-    Ok(completed
-        .into_iter()
-        .map(|(_, result)| result)
-        .collect())
+    Ok(completed.into_iter().map(|(_, result)| result).collect())
 }
 
 fn spawn_stage_worker(
@@ -1583,8 +1578,16 @@ mod tests {
         assert_eq!(results.len(), 3);
         for (index, result) in results.iter().enumerate() {
             assert_eq!(result.node_id, expected_nodes[index]);
-            assert!(result.result.is_ok(), "worker {}: {:?}", result.node_id, result.result);
-            assert_eq!(result.result.as_ref().unwrap().status, StageStatus::Complete);
+            assert!(
+                result.result.is_ok(),
+                "worker {}: {:?}",
+                result.node_id,
+                result.result
+            );
+            assert_eq!(
+                result.result.as_ref().unwrap().status,
+                StageStatus::Complete
+            );
         }
 
         for server in servers {
@@ -1705,7 +1708,10 @@ mod tests {
             results[0].result.as_ref().unwrap().status,
             StageStatus::Complete
         );
-        assert!(results[1].result.is_err(), "bad-key worker should fail independently");
+        assert!(
+            results[1].result.is_err(),
+            "bad-key worker should fail independently"
+        );
 
         good_server.await.unwrap().unwrap();
         rejected_server.await.unwrap();
