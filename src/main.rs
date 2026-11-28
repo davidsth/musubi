@@ -220,6 +220,9 @@ enum Command {
         /// TCP port used by worker staging listeners.
         #[arg(long, default_value_t = model_stage::DEFAULT_STAGE_PORT)]
         stage_port: u16,
+        /// Maximum simultaneous worker uploads (1–8, default 2).
+        #[arg(long, default_value_t = model_stage::DEFAULT_STAGE_PARALLELISM)]
+        parallelism: usize,
     },
     /// Run a cluster manager that authenticates node registrations and heartbeats.
     Manager {
@@ -300,7 +303,8 @@ async fn main() -> Result<()> {
             model,
             node_id,
             stage_port,
-        } => stage_model(lease, model, node_id, stage_port).await,
+            parallelism,
+        } => stage_model(lease, model, node_id, stage_port, parallelism).await,
         Command::Manager {
             bind,
             timeout_ms,
@@ -903,9 +907,16 @@ async fn stage_model(
     model_path: PathBuf,
     node_filter: Option<String>,
     stage_port: u16,
+    parallelism: usize,
 ) -> Result<()> {
     if stage_port == 0 {
         bail!("model-stage TCP port must be nonzero");
+    }
+    if !(1..=model_stage::MAX_STAGE_PARALLELISM).contains(&parallelism) {
+        bail!(
+            "--parallelism must be between 1 and {}",
+            model_stage::MAX_STAGE_PARALLELISM
+        );
     }
     let key = auth::cluster_key_from_env()?.context(
         "set AITP_CLUSTER_KEY to the same 32+ byte secret used by the manager and workers",
@@ -963,7 +974,9 @@ async fn stage_model(
         targets.len()
     );
     println!("Each receipt is bound to the active lease, target process session, and assigned layer range.");
+    println!("Using at most {parallelism} simultaneous TCP upload(s).");
 
+    let mut jobs = Vec::with_capacity(targets.len());
     for target in targets {
         let control_address: SocketAddr = target
             .address
@@ -984,20 +997,35 @@ async fn stage_model(
             end_layer_exclusive: target.end_layer_exclusive,
             auth_tag: Vec::new(),
         };
-        let reply = model_stage::send_to_worker(stage_address, &model_path, request, &key)
-            .await
-            .with_context(|| {
-                format!(
-                    "staging model on node {} at {}",
-                    target.node_id, stage_address
-                )
-            })?;
-        println!(
-            "{:?}: node {} | {} | lease {}",
-            reply.status,
-            reply.node_id,
-            reply.payload_file.as_deref().unwrap_or("no artifact"),
-            reply.lease_id
+        jobs.push((stage_address, model_path.clone(), request));
+    }
+
+    let results = model_stage::send_to_workers(jobs, &key, parallelism).await?;
+    let mut failures = Vec::new();
+    for outcome in results {
+        match outcome.result {
+            Ok(reply) => println!(
+                "{:?}: node {} at {} | {} | lease {}",
+                reply.status,
+                reply.node_id,
+                outcome.address,
+                reply.payload_file.as_deref().unwrap_or("no artifact"),
+                reply.lease_id
+            ),
+            Err(error) => {
+                eprintln!(
+                    "FAILED: node {} at {} | {error:#}",
+                    outcome.node_id, outcome.address
+                );
+                failures.push(format!("{} at {}: {error:#}", outcome.node_id, outcome.address));
+            }
+        }
+    }
+    if !failures.is_empty() {
+        bail!(
+            "model staging failed on {} worker(s): {}",
+            failures.len(),
+            failures.join("; ")
         );
     }
     Ok(())
