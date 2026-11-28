@@ -779,6 +779,11 @@ pub async fn send_to_workers(
     let Some((_, _, first_request)) = jobs.first() else {
         return Ok(Vec::new());
     };
+    let expected_coordinator = first_request.coordinator_node_id.clone();
+    let expected_lease = first_request.lease_id.clone();
+    let expected_filename = first_request.model_filename.clone();
+    let expected_sha256 = first_request.model_sha256.clone();
+    let expected_bytes = first_request.model_bytes;
 
     let mut node_ids = HashSet::with_capacity(jobs.len());
     let mut request_ids = HashSet::with_capacity(jobs.len());
@@ -787,17 +792,17 @@ pub async fn send_to_workers(
         if address.port() == 0 || address.ip().is_unspecified() {
             bail!("model-stage target address must have a specified IP and nonzero port");
         }
-        if !node_ids.insert(request.target_node_id.as_str()) {
+        if !node_ids.insert(request.target_node_id.clone()) {
             bail!("model-stage target list contains a duplicate worker node ID");
         }
-        if !request_ids.insert(request.request_id.as_str()) {
+        if !request_ids.insert(request.request_id.clone()) {
             bail!("model-stage target list contains a duplicate request UUID");
         }
-        if request.coordinator_node_id != first_request.coordinator_node_id
-            || request.lease_id != first_request.lease_id
-            || request.model_filename != first_request.model_filename
-            || request.model_sha256 != first_request.model_sha256
-            || request.model_bytes != first_request.model_bytes
+        if request.coordinator_node_id != expected_coordinator
+            || request.lease_id != expected_lease
+            || request.model_filename != expected_filename
+            || request.model_sha256 != expected_sha256
+            || request.model_bytes != expected_bytes
         {
             bail!("all model-stage targets must share one coordinator, lease, and model artifact");
         }
@@ -805,7 +810,7 @@ pub async fn send_to_workers(
 
     let total = jobs.len();
     let mut pending = jobs.into_iter().enumerate();
-    let shared_key: Arc<[u8]> = Arc::from(key);
+    let shared_key: Arc<[u8]> = Arc::<[u8]>::from(key.to_vec());
     let mut tasks: JoinSet<(usize, StageWorkerResult)> = JoinSet::new();
 
     for _ in 0..parallelism {
@@ -838,7 +843,7 @@ fn spawn_stage_worker(
     tasks.spawn(async move {
         let (address, model_path, request) = job;
         let node_id = request.target_node_id.clone();
-        let result = send_to_worker(address, &model_path, request, &key).await;
+        let result = send_to_worker(address, &model_path, request, key.as_ref()).await;
         (
             index,
             StageWorkerResult {
