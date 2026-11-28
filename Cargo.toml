@@ -1,6 +1,6 @@
 [package]
 name = "aitp"
-version = "0.19.0"
+version = "0.20.0"
 edition = "2021"
 description = "Experimental low-overhead transport for distributed LLM inference"
 license = "MIT"
