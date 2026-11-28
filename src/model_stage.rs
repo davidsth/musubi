@@ -1597,6 +1597,127 @@ mod tests {
         fs::remove_dir_all(root).await.unwrap();
     }
 
+    #[tokio::test]
+    async fn worker_failure_does_not_cancel_other_staging_targets() {
+        let key = vec![0x61; 32];
+        let rejected_worker_key = vec![0x62; 32];
+        let coordinator = uuid::Uuid::new_v4().to_string();
+        let lease = uuid::Uuid::new_v4().to_string();
+        let bytes = b"shared model artifact for worker fan-out".repeat(2048);
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        let root = temp_root();
+        fs::create_dir_all(&root).await.unwrap();
+        let source = root.join("source.gguf");
+        fs::write(&source, &bytes).await.unwrap();
+
+        let good_node = uuid::Uuid::new_v4().to_string();
+        let good_session = uuid::Uuid::new_v4().to_string();
+        let good_book = Arc::new(Mutex::new(make_book(
+            &key,
+            &coordinator,
+            &good_node,
+            &good_session,
+            &lease,
+            &digest,
+            Some(0),
+            Some(2),
+        )));
+        let good_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let good_address = good_listener.local_addr().unwrap();
+        let good_dir = root.join("good-worker");
+        let server_book = good_book.clone();
+        let server_key = key.clone();
+        let server_node = good_node.clone();
+        let server_session = good_session.clone();
+        let server_dir = good_dir.clone();
+        let good_server = tokio::spawn(async move {
+            let (stream, peer) = good_listener.accept().await?;
+            serve_connection(
+                stream,
+                peer,
+                &server_node,
+                &server_session,
+                &server_key,
+                server_book,
+                &server_dir,
+            )
+            .await
+        });
+
+        let rejected_node = uuid::Uuid::new_v4().to_string();
+        let rejected_session = uuid::Uuid::new_v4().to_string();
+        let rejected_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let rejected_address = rejected_listener.local_addr().unwrap();
+        let rejected_dir = root.join("rejected-worker");
+        let rejected_node_for_server = rejected_node.clone();
+        let rejected_session_for_server = rejected_session.clone();
+        let rejected_key_for_server = rejected_worker_key.clone();
+        let rejected_server = tokio::spawn(async move {
+            let (stream, peer) = rejected_listener.accept().await.unwrap();
+            let result = serve_connection(
+                stream,
+                peer,
+                &rejected_node_for_server,
+                &rejected_session_for_server,
+                &rejected_key_for_server,
+                Arc::new(Mutex::new(NodeAllocationBook::default())),
+                &rejected_dir,
+            )
+            .await;
+            assert!(result.is_err());
+        });
+
+        let jobs = vec![
+            (
+                good_address,
+                source.clone(),
+                make_request(
+                    &coordinator,
+                    &good_node,
+                    &good_session,
+                    &lease,
+                    &digest,
+                    bytes.len() as u64,
+                    Some(0),
+                    Some(2),
+                ),
+            ),
+            (
+                rejected_address,
+                source,
+                make_request(
+                    &coordinator,
+                    &rejected_node,
+                    &rejected_session,
+                    &lease,
+                    &digest,
+                    bytes.len() as u64,
+                    Some(2),
+                    Some(4),
+                ),
+            ),
+        ];
+
+        let results = send_to_workers(jobs, &key, 2).await.unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results[0].result.is_ok(), "first worker should complete");
+        assert_eq!(
+            results[0].result.as_ref().unwrap().status,
+            StageStatus::Complete
+        );
+        assert!(results[1].result.is_err(), "bad-key worker should fail independently");
+
+        good_server.await.unwrap().unwrap();
+        rejected_server.await.unwrap();
+        assert_eq!(
+            fs::read(good_dir.join(format!("{digest}.gguf")))
+                .await
+                .unwrap(),
+            bytes
+        );
+        fs::remove_dir_all(root).await.unwrap();
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn staged_model_hash_refuses_symbolic_links() {
