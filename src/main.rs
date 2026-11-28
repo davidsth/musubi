@@ -1017,7 +1017,10 @@ async fn stage_model(
                     "FAILED: node {} at {} | {error:#}",
                     outcome.node_id, outcome.address
                 );
-                failures.push(format!("{} at {}: {error:#}", outcome.node_id, outcome.address));
+                failures.push(format!(
+                    "{} at {}: {error:#}",
+                    outcome.node_id, outcome.address
+                ));
             }
         }
     }
