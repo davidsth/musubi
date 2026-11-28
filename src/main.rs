@@ -1,8 +1,10 @@
+mod allocation;
 mod auth;
 mod control;
 mod dashboard;
 mod gguf;
 mod hardware;
+mod model_stage;
 mod planner;
 mod protocol;
 mod runtime;
@@ -14,8 +16,9 @@ mod worker;
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use control::{
-    ControlMessage, NodeAnnouncement, TensorOfferMessage, TensorOfferReply, CONTROL_VERSION,
-    MAX_CONTROL_DATAGRAM,
+    AllocationPrepare, AllocationRelease, AllocationReleaseReply, AllocationReply,
+    AllocationStatusReply, AllocationStatusRequest, ControlMessage, NodeAnnouncement,
+    TensorOfferMessage, TensorOfferReply, CONTROL_VERSION, MAX_CONTROL_DATAGRAM,
 };
 use protocol::*;
 use std::{
@@ -28,7 +31,12 @@ use std::{
 };
 use sysinfo::System;
 use tensor::TensorDescriptor;
-use tokio::{fs, net::UdpSocket, sync::Mutex, time::timeout};
+use tokio::{
+    fs,
+    net::{TcpListener, UdpSocket},
+    sync::Mutex,
+    time::timeout,
+};
 use worker::OfferAdmission;
 
 const CHUNK_SIZE: usize = MAX_PAYLOAD;
@@ -117,6 +125,9 @@ enum Command {
         manager: Option<SocketAddr>,
         #[arg(long, default_value_t = 1000)]
         heartbeat_ms: u64,
+        /// Dedicated TCP listener for lease-bound GGUF artifact staging.
+        #[arg(long, default_value = "0.0.0.0:9004")]
+        stage_bind: SocketAddr,
     },
     /// Discover AITP nodes using IPv4 UDP broadcast.
     Discover {
@@ -170,6 +181,49 @@ enum Command {
         #[arg(long)]
         output: Option<PathBuf>,
     },
+    /// Acquire short-lived logical RAM leases for every node in a GGUF placement plan.
+    ReservePlan {
+        /// JSON output from plan-gguf.
+        #[arg(long)]
+        plan: PathBuf,
+        /// Exact GGUF model file used to produce the placement.
+        #[arg(long)]
+        model: PathBuf,
+        /// New path for the lease record; an existing file is never overwritten.
+        #[arg(long)]
+        output: PathBuf,
+        /// Lease time-to-live in seconds (1–300).
+        #[arg(long, default_value_t = allocation::DEFAULT_LEASE_TTL_SECS)]
+        ttl_secs: u64,
+    },
+    /// Release all node reservations recorded in a lease file.
+    ReleaseLease {
+        #[arg(long)]
+        lease: PathBuf,
+    },
+    /// Query each worker for the live state of a recorded allocation lease.
+    LeaseStatus {
+        #[arg(long)]
+        lease: PathBuf,
+    },
+    /// Stage the complete GGUF artifact on workers with an active matching allocation lease.
+    StageModel {
+        /// Saved lease record produced by reserve-plan.
+        #[arg(long)]
+        lease: PathBuf,
+        /// Exact GGUF file used to create the reservation.
+        #[arg(long)]
+        model: PathBuf,
+        /// Optional target node UUID; omit to stage to every worker in the lease.
+        #[arg(long)]
+        node_id: Option<String>,
+        /// TCP port used by worker staging listeners.
+        #[arg(long, default_value_t = model_stage::DEFAULT_STAGE_PORT)]
+        stage_port: u16,
+        /// Maximum simultaneous worker uploads (1–8, default 2).
+        #[arg(long, default_value_t = model_stage::DEFAULT_STAGE_PARALLELISM)]
+        parallelism: usize,
+    },
     /// Run a cluster manager that authenticates node registrations and heartbeats.
     Manager {
         #[arg(long, default_value = "0.0.0.0:9002")]
@@ -212,7 +266,8 @@ async fn main() -> Result<()> {
             name,
             manager,
             heartbeat_ms,
-        } => run_node(bind, data_port, name, manager, heartbeat_ms).await,
+            stage_bind,
+        } => run_node(bind, data_port, name, manager, heartbeat_ms, stage_bind).await,
         Command::Discover { target, wait_ms } => {
             discover(target, Duration::from_millis(wait_ms)).await
         }
@@ -235,6 +290,21 @@ async fn main() -> Result<()> {
             reserve_percent,
             output,
         } => plan_gguf(model, nodes, reserve_percent, output),
+        Command::ReservePlan {
+            plan,
+            model,
+            output,
+            ttl_secs,
+        } => reserve_plan(plan, model, output, ttl_secs).await,
+        Command::ReleaseLease { lease } => release_lease(lease).await,
+        Command::LeaseStatus { lease } => lease_status(lease).await,
+        Command::StageModel {
+            lease,
+            model,
+            node_id,
+            stage_port,
+            parallelism,
+        } => stage_model(lease, model, node_id, stage_port, parallelism).await,
         Command::Manager {
             bind,
             timeout_ms,
@@ -398,6 +468,568 @@ fn plan_gguf(
         );
     } else {
         println!("{encoded}");
+    }
+    Ok(())
+}
+
+async fn exchange_allocation_message(
+    target: SocketAddr,
+    message: &ControlMessage,
+) -> Result<ControlMessage> {
+    let encoded = serde_json::to_vec(message)?;
+    if encoded.is_empty() || encoded.len() > MAX_CONTROL_DATAGRAM {
+        bail!("allocation control message exceeds the control-plane datagram limit");
+    }
+
+    let bind = if target.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    };
+    let socket = UdpSocket::bind(bind).await?;
+    let mut buffer = [0u8; MAX_CONTROL_DATAGRAM];
+
+    // These bounded retries are for small control messages only. They are not
+    // a data-plane transport or a congestion-control mechanism.
+    for _ in 0..3 {
+        socket.send_to(&encoded, target).await?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        while tokio::time::Instant::now() < deadline {
+            let remaining = deadline - tokio::time::Instant::now();
+            match timeout(remaining, socket.recv_from(&mut buffer)).await {
+                Ok(Ok((length, peer))) if peer == target && length > 0 => {
+                    if let Ok(response) =
+                        serde_json::from_slice::<ControlMessage>(&buffer[..length])
+                    {
+                        return Ok(response);
+                    }
+                }
+                Ok(Ok(_)) => continue,
+                Ok(Err(error)) => return Err(error.into()),
+                Err(_) => break,
+            }
+        }
+    }
+    bail!("timed out waiting for an authenticated allocation response from {target}")
+}
+
+async fn send_allocation_prepare(
+    target: SocketAddr,
+    mut request: AllocationPrepare,
+    key: &[u8],
+) -> Result<AllocationReply> {
+    auth::sign_allocation_prepare(&mut request, key)?;
+    let response = exchange_allocation_message(
+        target,
+        &ControlMessage::AllocationPrepare {
+            request: request.clone(),
+        },
+    )
+    .await?;
+    let ControlMessage::AllocationReply { reply } = response else {
+        bail!("node {target} returned an unexpected allocation response");
+    };
+    if !auth::verify_allocation_reply(&reply, key)? {
+        bail!("node {target} returned an invalid allocation response signature");
+    }
+    if reply.coordinator_node_id != request.coordinator_node_id
+        || reply.node_id != request.target_node_id
+        || reply.session_id != request.target_session_id
+        || reply.lease_id != request.lease_id
+        || reply.reserved_bytes != request.reserved_bytes
+        || reply.expires_at_unix != request.expires_at_unix
+    {
+        bail!("node {target} returned an allocation response for a different request");
+    }
+    Ok(reply)
+}
+
+async fn send_allocation_release(
+    target: SocketAddr,
+    mut request: AllocationRelease,
+    key: &[u8],
+) -> Result<()> {
+    auth::sign_allocation_release(&mut request, key)?;
+    let response = exchange_allocation_message(
+        target,
+        &ControlMessage::AllocationRelease {
+            request: request.clone(),
+        },
+    )
+    .await?;
+    let ControlMessage::AllocationReleaseReply { reply } = response else {
+        bail!("node {target} returned an unexpected release response");
+    };
+    if !auth::verify_allocation_release_reply(&reply, key)? {
+        bail!("node {target} returned an invalid release response signature");
+    }
+    if reply.coordinator_node_id != request.coordinator_node_id
+        || reply.node_id != request.target_node_id
+        || reply.session_id != request.target_session_id
+        || reply.lease_id != request.lease_id
+        || !reply.released
+    {
+        bail!(
+            "node {target} did not confirm release of lease {}",
+            request.lease_id
+        );
+    }
+    Ok(())
+}
+
+async fn send_allocation_status(
+    target: SocketAddr,
+    mut request: AllocationStatusRequest,
+    key: &[u8],
+) -> Result<AllocationStatusReply> {
+    auth::sign_allocation_status(&mut request, key)?;
+    let response = exchange_allocation_message(
+        target,
+        &ControlMessage::AllocationStatus {
+            request: request.clone(),
+        },
+    )
+    .await?;
+    let ControlMessage::AllocationStatusReply { reply } = response else {
+        bail!("node {target} returned an unexpected allocation status response");
+    };
+    if !auth::verify_allocation_status_reply(&reply, key)? {
+        bail!("node {target} returned an invalid allocation status signature");
+    }
+    if reply.coordinator_node_id != request.coordinator_node_id
+        || reply.node_id != request.target_node_id
+        || reply.lease_id != request.lease_id
+        || reply.request_id != request.request_id
+    {
+        bail!("node {target} returned allocation status for a different request");
+    }
+    if reply.active && reply.session_id != request.target_session_id {
+        bail!("node {target} reported a lease active for a different process session");
+    }
+    Ok(reply)
+}
+
+fn write_lease_record(
+    path: &std::path::Path,
+    record: &allocation::AllocationLeaseRecord,
+) -> Result<()> {
+    allocation::validate_lease_record(record)?;
+    let encoded = serde_json::to_vec_pretty(record)?;
+    if encoded.len() as u64 > allocation::MAX_LEASE_FILE_BYTES {
+        bail!("allocation lease record exceeds the configured file-size limit");
+    }
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .with_context(|| {
+            format!(
+                "creating allocation lease {} without overwriting an existing file",
+                path.display()
+            )
+        })?;
+    if let Err(error) = file
+        .write_all(&encoded)
+        .and_then(|_| file.write_all(b"\n"))
+        .and_then(|_| file.sync_all())
+    {
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(error).with_context(|| format!("writing allocation lease {}", path.display()));
+    }
+    Ok(())
+}
+
+async fn release_targets(
+    targets: &[allocation::AllocationLeaseTarget],
+    coordinator_node_id: &str,
+    lease_id: &str,
+    key: &[u8],
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    for target in targets {
+        let address = match target.address.parse::<SocketAddr>() {
+            Ok(address) => address,
+            Err(error) => {
+                failures.push(format!("{}: invalid address: {error}", target.node_id));
+                continue;
+            }
+        };
+        let request = AllocationRelease {
+            version: CONTROL_VERSION,
+            coordinator_node_id: coordinator_node_id.to_owned(),
+            target_node_id: target.node_id.clone(),
+            target_session_id: target.node_session_id.clone(),
+            lease_id: lease_id.to_owned(),
+            auth_tag: Vec::new(),
+        };
+        if let Err(error) = send_allocation_release(address, request, key).await {
+            failures.push(format!("{} at {}: {error:#}", target.node_id, address));
+        }
+    }
+    failures
+}
+
+async fn reserve_plan(
+    plan_path: PathBuf,
+    model_path: PathBuf,
+    output_path: PathBuf,
+    ttl_secs: u64,
+) -> Result<()> {
+    if ttl_secs == 0 || ttl_secs > allocation::MAX_LEASE_TTL_SECS {
+        bail!(
+            "--ttl-secs must be between 1 and {} seconds",
+            allocation::MAX_LEASE_TTL_SECS
+        );
+    }
+    let key = auth::cluster_key_from_env()?
+        .context("set AITP_CLUSTER_KEY to the same 32+ byte cluster secret used by the workers")?;
+    let plan = allocation::load_placement_plan(&plan_path)?;
+    let targets = allocation::targets_from_plan(&plan)?;
+
+    // Reinspect the model before reserving anything so a stale or mismatched
+    // placement file cannot reserve RAM for a different GGUF artifact.
+    let inspected = gguf::inspect_file(&model_path)
+        .with_context(|| format!("inspecting GGUF model {}", model_path.display()))?;
+    if inspected.filename != plan.model_filename
+        || inspected.file_bytes != plan.file_bytes
+        || inspected.layer_count != Some(plan.layer_count)
+        || inspected.tensor_count != plan.tensor_count
+        || inspected.known_tensor_bytes != plan.model_tensor_bytes
+        || inspected.unsupported_tensor_count != 0
+        || inspected.architecture != plan.architecture
+    {
+        bail!("GGUF model metadata no longer matches the supplied placement plan");
+    }
+    let model_sha256 =
+        allocation::sha256_model(&model_path, plan.file_bytes, &plan.model_filename)?;
+
+    let created_at_unix = allocation::unix_now()?;
+    let expires_at_unix = created_at_unix
+        .checked_add(ttl_secs)
+        .context("allocation lease expiry timestamp overflow")?;
+    let coordinator_node_id = persistent_node_id()?;
+    let lease_id = uuid::Uuid::new_v4().to_string();
+    let record = allocation::AllocationLeaseRecord {
+        schema_version: 1,
+        lease_id: lease_id.clone(),
+        coordinator_node_id: coordinator_node_id.clone(),
+        model_filename: plan.model_filename.clone(),
+        model_sha256: model_sha256.clone(),
+        created_at_unix,
+        expires_at_unix,
+        targets: targets.clone(),
+    };
+
+    // Persist the recovery instructions before contacting workers. If a reply
+    // is lost and rollback also fails, release-lease can still retry cleanup.
+    write_lease_record(&output_path, &record)?;
+
+    let mut failure = None;
+    for target in &targets {
+        let address: SocketAddr = target
+            .address
+            .parse()
+            .with_context(|| format!("invalid address for node {}", target.node_id))?;
+        let request = AllocationPrepare {
+            version: CONTROL_VERSION,
+            coordinator_node_id: coordinator_node_id.clone(),
+            target_node_id: target.node_id.clone(),
+            target_session_id: target.node_session_id.clone(),
+            lease_id: lease_id.clone(),
+            model_sha256: model_sha256.clone(),
+            first_layer: target.first_layer,
+            end_layer_exclusive: target.end_layer_exclusive,
+            reserved_bytes: target.reserved_bytes,
+            expires_at_unix,
+            auth_tag: Vec::new(),
+        };
+
+        match send_allocation_prepare(address, request, &key).await {
+            Ok(reply) if reply.accepted => {
+                println!(
+                    "Reserved {:.2} GiB on node {} for layers {:?}..{:?}.",
+                    target.reserved_bytes as f64 / 1024.0_f64.powi(3),
+                    target.node_id,
+                    target.first_layer,
+                    target.end_layer_exclusive
+                );
+            }
+            Ok(reply) => {
+                failure = Some(format!(
+                    "node {} rejected the reservation: {}",
+                    target.node_id,
+                    reply.reason.as_deref().unwrap_or("no reason supplied")
+                ));
+                break;
+            }
+            Err(error) => {
+                failure = Some(format!("node {} at {}: {error:#}", target.node_id, address));
+                break;
+            }
+        }
+    }
+
+    if let Some(reason) = failure {
+        let cleanup_failures =
+            release_targets(&targets, &coordinator_node_id, &lease_id, &key).await;
+        if cleanup_failures.is_empty() {
+            std::fs::remove_file(&output_path).with_context(|| {
+                format!(
+                    "removing aborted allocation lease {} after successful rollback",
+                    output_path.display()
+                )
+            })?;
+            bail!("allocation aborted: {reason}; all worker reservations were rolled back");
+        }
+        bail!(
+            "allocation aborted: {reason}; rollback was incomplete: {}. The recovery lease was kept at {}; retry with aitp release-lease --lease {}",
+            cleanup_failures.join("; "),
+            output_path.display(),
+            output_path.display()
+        );
+    }
+
+    println!(
+        "Allocation lease {} active for {} worker(s), {} seconds.",
+        lease_id,
+        targets.len(),
+        ttl_secs
+    );
+    println!("Lease record: {}", output_path.display());
+    println!(
+        "GGUF SHA-256: {}. This is a logical memory reservation only; no weights were transferred or loaded.",
+        model_sha256
+    );
+    Ok(())
+}
+
+async fn release_lease(lease_path: PathBuf) -> Result<()> {
+    let key = auth::cluster_key_from_env()?
+        .context("set AITP_CLUSTER_KEY to the same 32+ byte cluster secret used by the workers")?;
+    let record = allocation::load_lease_record(&lease_path)?;
+    let failures = release_targets(
+        &record.targets,
+        &record.coordinator_node_id,
+        &record.lease_id,
+        &key,
+    )
+    .await;
+
+    if !failures.is_empty() {
+        bail!(
+            "could not confirm release on every worker; the lease record was kept for retry: {}",
+            failures.join("; ")
+        );
+    }
+    std::fs::remove_file(&lease_path)
+        .with_context(|| format!("removing released lease record {}", lease_path.display()))?;
+    println!(
+        "Released lease {} on all {} worker(s) and removed {}.",
+        record.lease_id,
+        record.targets.len(),
+        lease_path.display()
+    );
+    Ok(())
+}
+
+async fn lease_status(lease_path: PathBuf) -> Result<()> {
+    let key = auth::cluster_key_from_env()?
+        .context("set AITP_CLUSTER_KEY to the same 32+ byte cluster secret used by the workers")?;
+    let record = allocation::load_lease_record(&lease_path)?;
+    let mut active = 0usize;
+    let mut inactive = 0usize;
+    let mut unreachable = 0usize;
+
+    println!(
+        "Lease {} | model {} | expires at Unix {}",
+        record.lease_id, record.model_filename, record.expires_at_unix
+    );
+    for target in &record.targets {
+        let address: SocketAddr = target
+            .address
+            .parse()
+            .with_context(|| format!("invalid address for node {}", target.node_id))?;
+        let request = AllocationStatusRequest {
+            version: CONTROL_VERSION,
+            coordinator_node_id: record.coordinator_node_id.clone(),
+            target_node_id: target.node_id.clone(),
+            target_session_id: target.node_session_id.clone(),
+            lease_id: record.lease_id.clone(),
+            request_id: uuid::Uuid::new_v4().to_string(),
+            auth_tag: Vec::new(),
+        };
+
+        match send_allocation_status(address, request, &key).await {
+            Ok(reply) => {
+                let session_matches = reply.session_id == target.node_session_id;
+                let reservation_matches = reply.reserved_bytes == target.reserved_bytes
+                    && reply.expires_at_unix == record.expires_at_unix;
+                let confirmed_active = reply.active && session_matches && reservation_matches;
+                let state = if !session_matches {
+                    "STALE SESSION"
+                } else if confirmed_active {
+                    "ACTIVE"
+                } else if reply.active {
+                    "MISMATCH"
+                } else {
+                    "INACTIVE"
+                };
+                if confirmed_active {
+                    active += 1;
+                } else {
+                    inactive += 1;
+                }
+                println!(
+                    "{state}: {} at {} | {:.2} GiB reserved | session {}",
+                    target.node_id,
+                    address,
+                    reply.reserved_bytes as f64 / 1024.0_f64.powi(3),
+                    reply.session_id
+                );
+            }
+            Err(error) => {
+                unreachable += 1;
+                println!("UNREACHABLE: {} at {} | {error:#}", target.node_id, address);
+            }
+        }
+    }
+
+    println!(
+        "Lease status summary: {active} active, {inactive} inactive or mismatched, {unreachable} unreachable."
+    );
+    Ok(())
+}
+
+async fn stage_model(
+    lease_path: PathBuf,
+    model_path: PathBuf,
+    node_filter: Option<String>,
+    stage_port: u16,
+    parallelism: usize,
+) -> Result<()> {
+    if stage_port == 0 {
+        bail!("model-stage TCP port must be nonzero");
+    }
+    if !(1..=model_stage::MAX_STAGE_PARALLELISM).contains(&parallelism) {
+        bail!(
+            "--parallelism must be between 1 and {}",
+            model_stage::MAX_STAGE_PARALLELISM
+        );
+    }
+    let key = auth::cluster_key_from_env()?.context(
+        "set AITP_CLUSTER_KEY to the same 32+ byte secret used by the manager and workers",
+    )?;
+    let record = allocation::load_lease_record(&lease_path)?;
+    if record.expires_at_unix <= allocation::unix_now()? {
+        bail!("allocation lease has expired; create a fresh plan and lease before staging");
+    }
+    let coordinator_node_id = persistent_node_id()?;
+    if record.coordinator_node_id != coordinator_node_id {
+        bail!("lease record belongs to a different coordinator node identity");
+    }
+
+    let expected_filename = record.model_filename.clone();
+    let source_path = model_path.clone();
+    let (model, source_sha256) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let summary = gguf::inspect_file(&source_path)
+            .with_context(|| format!("inspecting GGUF model {}", source_path.display()))?;
+        if summary.file_bytes > model_stage::MAX_MODEL_BYTES {
+            bail!("GGUF model exceeds the model-stage size ceiling");
+        }
+        let digest =
+            allocation::sha256_model(&source_path, summary.file_bytes, &expected_filename)?;
+        Ok((summary, digest))
+    })
+    .await
+    .context("joining GGUF inspection and hashing task")??;
+
+    if source_sha256 != record.model_sha256 {
+        bail!("source GGUF SHA-256 does not match the saved allocation lease");
+    }
+
+    let targets: Vec<_> = record
+        .targets
+        .iter()
+        .filter(|target| {
+            node_filter
+                .as_deref()
+                .map(|id| id == target.node_id.as_str())
+                .unwrap_or(true)
+        })
+        .collect();
+    if targets.is_empty() {
+        match node_filter {
+            Some(node_id) => bail!("node {node_id} is not assigned by this lease"),
+            None => bail!("allocation lease contains no staging targets"),
+        }
+    }
+
+    println!(
+        "Staging complete GGUF artifact '{}' ({:.2} GiB, SHA-256 {}…) to {} worker(s).",
+        record.model_filename,
+        model.file_bytes as f64 / 1024.0_f64.powi(3),
+        &record.model_sha256[..16],
+        targets.len()
+    );
+    println!("Each receipt is bound to the active lease, target process session, and assigned layer range.");
+    println!("Using at most {parallelism} simultaneous TCP upload(s).");
+
+    let mut jobs = Vec::with_capacity(targets.len());
+    for target in targets {
+        let control_address: SocketAddr = target
+            .address
+            .parse()
+            .with_context(|| format!("parsing address for node {}", target.node_id))?;
+        let stage_address = SocketAddr::new(control_address.ip(), stage_port);
+        let request = model_stage::StageRequest {
+            version: model_stage::STAGE_PROTOCOL_VERSION,
+            coordinator_node_id: record.coordinator_node_id.clone(),
+            target_node_id: target.node_id.clone(),
+            target_session_id: target.node_session_id.clone(),
+            lease_id: record.lease_id.clone(),
+            request_id: uuid::Uuid::new_v4().to_string(),
+            model_filename: record.model_filename.clone(),
+            model_sha256: record.model_sha256.clone(),
+            model_bytes: model.file_bytes,
+            first_layer: target.first_layer,
+            end_layer_exclusive: target.end_layer_exclusive,
+            auth_tag: Vec::new(),
+        };
+        jobs.push((stage_address, model_path.clone(), request));
+    }
+
+    let results = model_stage::send_to_workers(jobs, &key, parallelism).await?;
+    let mut failures = Vec::new();
+    for outcome in results {
+        match outcome.result {
+            Ok(reply) => println!(
+                "{:?}: node {} at {} | {} | lease {}",
+                reply.status,
+                reply.node_id,
+                outcome.address,
+                reply.payload_file.as_deref().unwrap_or("no artifact"),
+                reply.lease_id
+            ),
+            Err(error) => {
+                eprintln!(
+                    "FAILED: node {} at {} | {error:#}",
+                    outcome.node_id, outcome.address
+                );
+                failures.push(format!(
+                    "{} at {}: {error:#}",
+                    outcome.node_id, outcome.address
+                ));
+            }
+        }
+    }
+    if !failures.is_empty() {
+        bail!(
+            "model staging failed on {} worker(s): {}",
+            failures.len(),
+            failures.join("; ")
+        );
     }
     Ok(())
 }
@@ -942,6 +1574,7 @@ async fn run_node(
     name: Option<String>,
     manager: Option<SocketAddr>,
     heartbeat_ms: u64,
+    stage_bind: SocketAddr,
 ) -> Result<()> {
     let cluster_key = auth::cluster_key_from_env()?;
     if manager.is_some() && cluster_key.is_none() {
@@ -951,9 +1584,40 @@ async fn run_node(
     if data_port == 0 {
         bail!("data port must be nonzero");
     }
+    if stage_bind.port() == 0 {
+        bail!("model-stage TCP port must be nonzero");
+    }
     let socket = UdpSocket::bind(bind).await?;
     let node_id = persistent_node_id()?;
     let offer_admission = Arc::new(Mutex::new(OfferAdmission::default()));
+    let allocation_book = Arc::new(Mutex::new(allocation::NodeAllocationBook::default()));
+    if manager.is_some() {
+        let key = cluster_key
+            .clone()
+            .context("managed model staging requires AITP_CLUSTER_KEY")?;
+        let listener = TcpListener::bind(stage_bind)
+            .await
+            .with_context(|| format!("binding lease-bound GGUF staging listener {stage_bind}"))?;
+        let stage_book = allocation_book.clone();
+        let stage_node_id = node_id.clone();
+        let stage_session_id = session_id.clone();
+        let stage_directory = model_stage::configured_model_dir();
+        tokio::spawn(async move {
+            if let Err(error) = model_stage::run_listener(
+                listener,
+                stage_node_id,
+                stage_session_id,
+                key,
+                stage_book,
+                stage_directory,
+            )
+            .await
+            {
+                eprintln!("AITP GGUF staging listener stopped: {error:#}");
+            }
+        });
+        println!("Lease-bound GGUF staging TCP listener active on {stage_bind}");
+    }
     if let Some(key) = cluster_key.clone() {
         let data_bind = SocketAddr::new(bind.ip(), data_port);
         let data_socket = UdpSocket::bind(data_bind)
@@ -1069,12 +1733,14 @@ async fn run_node(
                 let key = cluster_key
                     .as_deref()
                     .context("managed-cluster heartbeat requires AITP_CLUSTER_KEY")?;
+                let reserved_memory_bytes = allocation_book.lock().await.reserved_bytes();
                 let auth_tag = auth::sign_node_heartbeat(
                     CONTROL_VERSION,
                     &node_id,
                     &session_id,
                     sequence,
                     available_memory_bytes,
+                    reserved_memory_bytes,
                     key,
                 )?;
                 let message = ControlMessage::Heartbeat {
@@ -1083,6 +1749,7 @@ async fn run_node(
                     session_id: session_id.clone(),
                     sequence,
                     available_memory_bytes,
+                    reserved_memory_bytes,
                     auth_tag,
                 };
                 let encoded = serde_json::to_vec(&message)?;
@@ -1095,7 +1762,7 @@ async fn run_node(
             }
             _ = offer_reap.tick() => {
                 offer_admission.lock().await.expire(Instant::now());
-
+                allocation_book.lock().await.expire(Instant::now());
             }
             received = socket.recv_from(&mut buf) => {
                 let (n, peer) = received?;
@@ -1143,6 +1810,124 @@ async fn run_node(
                             );
                         }
                     }
+                    ControlMessage::AllocationPrepare { request } => {
+                        if manager.is_none() {
+                            continue;
+                        }
+                        let Some(key) = cluster_key.as_deref() else {
+                            continue;
+                        };
+                        if !auth::verify_allocation_prepare(&request, key).unwrap_or(false) {
+                            continue;
+                        }
+                        system.refresh_memory();
+                        let available_memory_bytes = system.available_memory().min(total_memory_bytes);
+                        let result = allocation_book.lock().await.prepare(
+                            &request,
+                            &node_id,
+                            &session_id,
+                            key,
+                            available_memory_bytes,
+                            Instant::now(),
+                            allocation::unix_now()?,
+                        );
+                        let accepted = result.is_ok();
+                        let reason = result.err().map(str::to_string);
+                        let mut reply = AllocationReply {
+                            version: CONTROL_VERSION,
+                            coordinator_node_id: request.coordinator_node_id.clone(),
+                            node_id: node_id.clone(),
+                            session_id: session_id.clone(),
+                            lease_id: request.lease_id.clone(),
+                            accepted,
+                            reason,
+                            reserved_bytes: request.reserved_bytes,
+                            expires_at_unix: request.expires_at_unix,
+                            auth_tag: Vec::new(),
+                        };
+                        if auth::sign_allocation_reply(&mut reply, key).is_ok() {
+                            let response = serde_json::to_vec(&ControlMessage::AllocationReply { reply })?;
+                            if response.len() <= MAX_CONTROL_DATAGRAM {
+                                socket.send_to(&response, peer).await?;
+                            }
+                        }
+                    }
+                    ControlMessage::AllocationRelease { request } => {
+                        if manager.is_none() {
+                            continue;
+                        }
+                        let Some(key) = cluster_key.as_deref() else {
+                            continue;
+                        };
+                        if !auth::verify_allocation_release(&request, key).unwrap_or(false) {
+                            continue;
+                        }
+                        let released = allocation_book.lock().await.release(
+                            &request,
+                            &node_id,
+                            &session_id,
+                            key,
+                            Instant::now(),
+                        ).unwrap_or(false);
+                        let mut reply = AllocationReleaseReply {
+                            version: CONTROL_VERSION,
+                            coordinator_node_id: request.coordinator_node_id.clone(),
+                            node_id: node_id.clone(),
+                            session_id: session_id.clone(),
+                            lease_id: request.lease_id.clone(),
+                            released,
+                            auth_tag: Vec::new(),
+                        };
+                        if auth::sign_allocation_release_reply(&mut reply, key).is_ok() {
+                            let response = serde_json::to_vec(&ControlMessage::AllocationReleaseReply { reply })?;
+                            if response.len() <= MAX_CONTROL_DATAGRAM {
+                                socket.send_to(&response, peer).await?;
+                            }
+                        }
+                    }
+                    ControlMessage::AllocationStatus { request } => {
+                        if manager.is_none() {
+                            continue;
+                        }
+                        let Some(key) = cluster_key.as_deref() else {
+                            continue;
+                        };
+                        if !auth::verify_allocation_status(&request, key).unwrap_or(false)
+                            || request.target_node_id != node_id
+                        {
+                            continue;
+                        }
+                        let (active, reserved_bytes, expires_at_unix) = allocation_book
+                            .lock()
+                            .await
+                            .status(
+                                &request,
+                                &node_id,
+                                &session_id,
+                                key,
+                                Instant::now(),
+                            )
+                            .unwrap_or((false, 0, 0));
+                        let mut reply = AllocationStatusReply {
+                            version: CONTROL_VERSION,
+                            coordinator_node_id: request.coordinator_node_id.clone(),
+                            node_id: node_id.clone(),
+                            session_id: session_id.clone(),
+                            lease_id: request.lease_id.clone(),
+                            request_id: request.request_id.clone(),
+                            active,
+                            reserved_bytes,
+                            expires_at_unix,
+                            auth_tag: Vec::new(),
+                        };
+                        if auth::sign_allocation_status_reply(&mut reply, key).is_ok() {
+                            let response =
+                                serde_json::to_vec(&ControlMessage::AllocationStatusReply { reply })?;
+                            if response.len() <= MAX_CONTROL_DATAGRAM {
+                                socket.send_to(&response, peer).await?;
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -1157,6 +1942,7 @@ struct ManagedNode {
     last_seen: Instant,
     last_sequence: u64,
     session_id: String,
+    reserved_memory_bytes: u64,
 }
 
 async fn run_manager(
@@ -1199,10 +1985,11 @@ async fn run_manager(
                     for (id, node) in ordered {
                         let age = node.last_seen.elapsed();
                         let status = if age <= offline_after { "ONLINE" } else { "OFFLINE" };
-                        println!("- {} [{}] {} {} | {} | {} CPUs | RAM {:.1}/{:.1} GiB available/total | {} | last heartbeat {:.1}s ago",
+                        println!("- {} [{}] {} {} | {} | {} CPUs | RAM {:.1} GiB schedulable + {:.1} GiB reserved / {:.1} GiB total | {} | last heartbeat {:.1}s ago",
                             node.announcement.hostname, id, node.announcement.os,
                             node.announcement.arch, node.announcement.cpu_model, node.announcement.logical_cpus,
-                            node.announcement.available_memory_bytes as f64 / 1024.0_f64.powi(3),
+                            node.announcement.available_memory_bytes.saturating_sub(node.reserved_memory_bytes) as f64 / 1024.0_f64.powi(3),
+                            node.reserved_memory_bytes as f64 / 1024.0_f64.powi(3),
                             node.announcement.total_memory_bytes as f64 / 1024.0_f64.powi(3),
                             status, age.as_secs_f32());
                         for gpu in &node.announcement.accelerators { println!("    GPU: {} ({}, {})", gpu.name, gpu.vendor, hardware::memory_label(gpu)); }
@@ -1218,12 +2005,15 @@ async fn run_manager(
                         node_id: id.clone(),
                         hostname: node.announcement.hostname.clone(),
                         address: node.address.to_string(),
+                        session_id: node.session_id.clone(),
                         os: node.announcement.os.clone(),
                         arch: node.announcement.arch.clone(),
                         cpu_model: node.announcement.cpu_model.clone(),
                         logical_cpus: node.announcement.logical_cpus,
                         total_memory_bytes: node.announcement.total_memory_bytes,
-                        available_memory_bytes: node.announcement.available_memory_bytes,
+                        available_memory_bytes: node.announcement.available_memory_bytes
+                            .saturating_sub(node.reserved_memory_bytes),
+                        reserved_memory_bytes: node.reserved_memory_bytes,
                         accelerators: node.announcement.accelerators.clone(),
                         online,
                         last_seen_secs: age.as_secs(),
@@ -1264,6 +2054,7 @@ async fn run_manager(
                                 last_seen: Instant::now(),
                                 last_sequence: 0,
                                 session_id,
+                                reserved_memory_bytes: 0,
                             });
                             println!(
                                 "{} authenticated node registration: {} from {}",
@@ -1279,6 +2070,7 @@ async fn run_manager(
                         session_id,
                         sequence,
                         available_memory_bytes,
+                        reserved_memory_bytes,
                         auth_tag,
                     } => {
                         if auth::verify_node_heartbeat(
@@ -1287,6 +2079,7 @@ async fn run_manager(
                             &session_id,
                             sequence,
                             available_memory_bytes,
+                            reserved_memory_bytes,
                             &auth_tag,
                             &cluster_key,
                         )? {
@@ -1297,6 +2090,7 @@ async fn run_manager(
                                     node.address = peer;
                                     node.announcement.available_memory_bytes = available_memory_bytes
                                         .min(node.announcement.total_memory_bytes);
+                                    node.reserved_memory_bytes = reserved_memory_bytes;
                                 }
                             }
                         }

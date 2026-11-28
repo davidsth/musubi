@@ -24,12 +24,16 @@ pub struct DashboardNode {
     pub node_id: String,
     pub hostname: String,
     pub address: String,
+    /// Authenticated worker process-session UUID used to reject stale plans.
+    pub session_id: String,
     pub os: String,
     pub arch: String,
     pub cpu_model: String,
     pub logical_cpus: usize,
     pub total_memory_bytes: u64,
+    /// Raw OS-available RAM minus current AITP logical reservations.
     pub available_memory_bytes: u64,
+    pub reserved_memory_bytes: u64,
     pub accelerators: Vec<crate::control::AcceleratorInfo>,
     pub online: bool,
     pub last_seen_secs: u64,
@@ -96,6 +100,31 @@ mod tests {
         assert_eq!(value["tensor_store"]["count"], 0);
         assert_eq!(value["tensor_store"]["recent"].as_array().unwrap().len(), 0);
         assert_eq!(value["model_store"]["models"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn dashboard_snapshot_reports_session_and_reserved_memory() {
+        let node = DashboardNode {
+            node_id: "node-id".into(),
+            hostname: "worker".into(),
+            address: "192.0.2.10:9001".into(),
+            session_id: "00000000-0000-4000-8000-000000000042".into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            cpu_model: "Test CPU".into(),
+            logical_cpus: 8,
+            total_memory_bytes: 4096,
+            available_memory_bytes: 1024,
+            reserved_memory_bytes: 512,
+            accelerators: Vec::new(),
+            online: true,
+            last_seen_secs: 0,
+        };
+        let value = serde_json::to_value(node).unwrap();
+        assert_eq!(value["session_id"], "00000000-0000-4000-8000-000000000042");
+        assert_eq!(value["available_memory_bytes"], 1024);
+        assert_eq!(value["reserved_memory_bytes"], 512);
+        assert!(DASHBOARD_HTML.contains("Memory free / reserved"));
     }
 
     #[test]

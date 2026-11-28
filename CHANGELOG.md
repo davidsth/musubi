@@ -1,5 +1,54 @@
 # Changelog
 
+## v0.20.0 — Add bounded parallel GGUF staging
+
+- Added coordinator-side multi-worker TCP staging fan-out with a bounded 1–8 concurrency limit (default 2); requests remain independently authenticated and lease/session/layer-range bound.
+- Results are collected in placement order and reported per worker; one worker's connection or transfer error no longer prevents the coordinator from attempting the remaining selected workers.
+- Added tests for the concurrency limit and multi-worker artifact integrity across transfers larger than the 1 MiB copy buffer.
+- Added the `stage-model --parallelism` option and documented trade-offs for constrained LANs. Each worker still serves one upload at a time.
+- No control-plane schema, TCP staging frame, or fixed 32-byte UDP tensor data-plane wire-format changes; no model sharding or inference execution added.
+
+## v0.19.0 — Harden staged model file opens
+
+- Open coordinator source models and existing content-addressed worker artifacts without following symbolic links or Windows reparse points; validate and hash the opened file handle rather than reopening a path after a metadata check.
+- Added a Unix regression test proving that staged-model hash verification rejects symbolic-link paths.
+- Kept the JSON control plane, TCP staging protocol, and fixed 32-byte UDP tensor data-plane framing unchanged.
+
+## v0.18.0 — Add lease-bound GGUF artifact staging over TCP
+
+- Added a separate TCP model-staging service (default port 9004) for reliable, backpressured GGUF artifact delivery; the UDP control-plane schema v9 and fixed 32-byte tensor data-plane header are unchanged.
+- Added HMAC-SHA256 stage requests and signed receipts bound to coordinator identity, worker process session, active lease ID, request UUID, model basename, SHA-256, exact byte count, and assigned transformer-layer range.
+- Workers accept staging only when the exact allocation lease is active and re-check the lease before publication; mismatched coordinator, node/session, digest, or layer-range requests are rejected.
+- Streamed exact model bytes with a 1 MiB bounded buffer, per-read/write idle timeouts, a 256 GiB model-size ceiling, and SHA-256 verification on both ends.
+- Publish content-addressed `<sha256>.gguf` artifacts and per-lease JSON receipts only after full verification; interrupted uploads remove their temporary files, and already-verified artifacts are idempotently reused.
+- Added `stage-model` CLI and an optional `--node-id` filter; managed workers expose a dedicated `--stage-bind` listener. The complete GGUF is copied to each target at this stage; files are not yet sharded or loaded into llama.cpp.
+- Added tests for exact lease binding, signed request tampering, multi-chunk TCP staging, idempotent retry, and interrupted-upload cleanup.
+- Bound requests to the actual worker process identity, added a short unauthenticated-header timeout, and tested rejection when a lease is revoked during upload. Staging must complete within the active lease TTL (maximum 300 seconds); renewal/resume is deferred.
+- No arbitrary remote execution, model invocation, or UDP congestion-control claim added.
+
+## v0.17.0 — Add authenticated lease status inspection
+
+- Bumped the JSON control-plane schema to version 9; the fixed 32-byte tensor data-plane header and payload framing are unchanged.
+- Added HMAC-SHA256, read-only allocation-status queries and replies bound to the coordinator, target node/session, lease ID, and returned active/reserved/expiry state.
+- Added worker-side status lookup that reports a lease active only for the current worker process session and owning coordinator; stale-session queries report inactive without reviving or changing a lease.
+- Added the `lease-status` CLI command to inspect all nodes in a saved lease record, verifying replies and distinguishing active, inactive, stale-session, mismatched, and unreachable targets.
+- Added tests for control datagram bounds, query/reply authentication and field binding, active-session matching, and coordinator isolation.
+- No changes to the binary tensor data plane, lease mutation semantics, or remote execution surface; status queries are read-only.
+
+# Changelog
+
+## v0.16.0 — Add authenticated, expiring logical memory leases
+
+- Bumped the JSON control-plane schema to version 8; the fixed 32-byte tensor data-plane header and payload framing are unchanged.
+- Added HMAC-SHA256 allocation prepare/reply/release messages bound to the coordinator, target node, target process session, lease ID, GGUF SHA-256, layer range, byte count, and expiry.
+- Added a bounded worker-side lease book with 1–300 second TTLs, idempotent prepare/release, current-session checks, available-RAM admission, expiration, and replay tombstones.
+- Extended authenticated heartbeats with active reserved-memory totals; the manager dashboard and GGUF planner now report/use schedulable RAM after subtracting those reservations.
+- Added `reserve-plan` and `release-lease` CLI commands. The coordinator rechecks GGUF metadata, hashes the exact model file, persists recovery information before contacting workers, and attempts rollback if any worker rejects or times out.
+- Placement plans now carry the authenticated worker process-session IDs; stale plans are rejected by the lease command.
+- Added allocation message size, HMAC field-binding, lease accounting, idempotence, expiry, session-mismatch, overcommit, and replay tests.
+- Reservations are logical accounting only: no OS memory is pinned, no model weights are moved or loaded, and no inference work is executed. Manager inventory and worker leases remain in-memory.
+- No change to the binary tensor data plane, no arbitrary remote execution, and no claim of UDP congestion control or production reliability.
+
 ## v0.15.0 — Authenticate cluster-manager membership
 
 - Bumped the JSON control-plane schema to version 7; the fixed 32-byte tensor data-plane header is unchanged.
